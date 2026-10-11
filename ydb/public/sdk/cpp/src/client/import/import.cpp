@@ -53,6 +53,10 @@ void FillS3Settings(TS3SettingsProto& proto, const TSettings& settings) {
     }
 
     proto.set_disable_virtual_addressing(!settings.UseVirtualAddressing_);
+
+    if (!settings.Region_.empty()) {
+        proto.set_region(TStringType{settings.Region_});
+    }
 }
 
 } // anonymous
@@ -77,6 +81,7 @@ TImportFromS3Response::TImportFromS3Response(TStatus&& status, Ydb::Operations::
 
     Metadata_.Settings.Description(metadata.settings().description());
     Metadata_.Settings.NumberOfRetries(metadata.settings().number_of_retries());
+    Metadata_.Settings.Region(metadata.settings().region());
     Metadata_.Settings.IndexPopulationMode(TProtoAccessor::FromProto(metadata.settings().index_population_mode()));
 
     // progress

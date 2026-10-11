@@ -117,6 +117,10 @@ Aws::Client::ClientConfiguration ConfigFromSettings(const NKikimrConfig::TAwsCli
 
     config.scheme = NPrivate::ParseScheme(settings.scheme());
 
+    if (!settings.region().empty()) {
+        config.region = settings.region();
+    }
+
     return config;
 }
 

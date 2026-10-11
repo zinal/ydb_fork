@@ -23,6 +23,8 @@ struct TS3Settings {
     FLUENT_SETTING(std::string, SecretKey);
     // true by default for backward compatibility
     FLUENT_SETTING_DEFAULT(bool, UseVirtualAddressing, true);
+    // SigV4 signing region. Empty means the service default.
+    FLUENT_SETTING(std::string, Region);
 };
 
 } // namespace NYdb

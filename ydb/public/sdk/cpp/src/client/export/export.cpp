@@ -99,6 +99,7 @@ TExportToS3Response::TExportToS3Response(TStatus&& status, Ydb::Operations::Oper
 
     Metadata_.Settings.Description(metadata.settings().description());
     Metadata_.Settings.NumberOfRetries(metadata.settings().number_of_retries());
+    Metadata_.Settings.Region(metadata.settings().region());
     Metadata_.Settings.IncludeIndexData(metadata.settings().include_index_data());
 
     if (!metadata.settings().compression().empty()) {
@@ -278,6 +279,9 @@ TFuture<TExportToS3Response> TExportClient::ExportToS3(const TExportToS3Settings
     }
 
     request.mutable_settings()->set_disable_virtual_addressing(!settings.UseVirtualAddressing_);
+    if (!settings.Region_.empty()) {
+        request.mutable_settings()->set_region(TStringType{settings.Region_});
+    }
     request.mutable_settings()->set_include_index_data(settings.IncludeIndexData_);
 
     if (settings.EncryptionAlgorithm_.empty() != settings.SymmetricKey_.empty()) {

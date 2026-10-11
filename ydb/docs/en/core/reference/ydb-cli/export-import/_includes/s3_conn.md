@@ -8,6 +8,13 @@ To connect with S3, you need to specify an endpoint and bucket:
 
 `--s3-endpoint HOST`: An S3 endpoint. `HOST`: A valid host name, such as: `storage.yandexcloud.net`
 
+`--s3-region REGION`: The region used to sign S3 requests. Yandex Object Storage rejects a request signed for a different region. When this option is omitted, the CLI selects the region from the endpoint:
+
+* `storage.yandexcloud.net` — `ru-central1`
+* `storage.yandexcloud.kz` — `kz1`
+
+For any other endpoint the AWS SDK default is used. Pass `--s3-region` to override the inferred value.
+
 `--bucket STR`: An S3 bucket. `STR`: A string containing the bucket name
 
 ## Authentication {#auth}

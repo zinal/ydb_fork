@@ -86,6 +86,7 @@ public:
         CHECK_EXP(settings.secret_key() == S3SecretKey, "Incorrect S3 secret key: \"" << settings.secret_key() << "\" instead of \"" << S3SecretKey << "\"");
         CHECK_EXP(settings.number_of_retries() == NumberOfRetries, "Incorrect number of retries: " << settings.number_of_retries() << " instead of " << NumberOfRetries);
         CHECK_EXP(settings.disable_virtual_addressing() == DisableVirtualAddressing, "Incorrect disable virtual addressing: " << settings.disable_virtual_addressing() << " instead of " << DisableVirtualAddressing);
+        CHECK_EXP(settings.region() == Region, "Incorrect region: \"" << settings.region() << "\" instead of \"" << Region << "\"");
         CheckEncryptionSettings(settings);
         CheckExcludeRegexps(settings);
     }
@@ -151,6 +152,7 @@ public:
         Description.clear();
         NumberOfRetries = DEFAULT_RETRIES;
         DisableVirtualAddressing = false;
+        Region.clear();
         CommonSourcePrefix.clear();
         CommonDestinationPath.clear();
         SymmetricKey.clear();
@@ -237,6 +239,11 @@ public:
         return *this;
     }
 
+    TImportImpl& ExpectRegion(TString region) {
+        Region = std::move(region);
+        return *this;
+    }
+
     TImportImpl& ExpectCommonSourcePrefix(TString commonSourcePrefix) {
         CommonSourcePrefix = std::move(commonSourcePrefix);
         return *this;
@@ -283,6 +290,7 @@ public:
     TString Description;
     ui32 NumberOfRetries = DEFAULT_RETRIES;
     bool DisableVirtualAddressing = false;
+    TString Region;
     TString CommonSourcePrefix;
     TString CommonDestinationPath;
     TString SymmetricKey;
@@ -376,6 +384,76 @@ Y_UNIT_TEST_SUITE(ImportTest) {
                 "--index-population-mode", "Import",
                 "--exclude", "^logs/",
                 "--exclude", "^tmp/",
+            }
+        );
+    }
+
+    Y_UNIT_TEST_F(PassS3Region, TImportFixture) {
+        Service<TImportImpl>()
+            .ExpectBucket(TEST_BUCKET)
+            .ExpectS3Endpoint("https://ydb.s3.local")
+            .ExpectS3AccessKey("test-key")
+            .ExpectS3SecretKey("test-access-key")
+            .ExpectRegion("custom-region")
+            .ExpectCommonSourcePrefix("source/prefix");
+
+        RunCli(
+            {
+                "-v",
+                "-e", GetEndpoint(),
+                "-d", GetDatabase(),
+                "import", "s3",
+                "--bucket", TEST_BUCKET,
+                "--s3-endpoint", "https://ydb.s3.local",
+                "--s3-region", "custom-region",
+                "--access-key", "test-key",
+                "--secret-key", "test-access-key",
+                "--source-prefix", "source/prefix",
+            }
+        );
+
+        Service<TImportImpl>()
+            .ExpectBucket(TEST_BUCKET)
+            .ExpectS3Endpoint("storage.yandexcloud.kz")
+            .ExpectS3AccessKey("test-key")
+            .ExpectS3SecretKey("test-access-key")
+            .ExpectRegion("kz1")
+            .ExpectCommonSourcePrefix("source/prefix");
+
+        RunCli(
+            {
+                "-v",
+                "-e", GetEndpoint(),
+                "-d", GetDatabase(),
+                "import", "s3",
+                "--bucket", TEST_BUCKET,
+                "--s3-endpoint", "storage.yandexcloud.kz",
+                "--access-key", "test-key",
+                "--secret-key", "test-access-key",
+                "--source-prefix", "source/prefix",
+            }
+        );
+
+        Service<TImportImpl>()
+            .ExpectBucket(TEST_BUCKET)
+            .ExpectS3Endpoint("https://storage.yandexcloud.net/ignored")
+            .ExpectS3AccessKey("test-key")
+            .ExpectS3SecretKey("test-access-key")
+            .ExpectRegion("explicit")
+            .ExpectCommonSourcePrefix("source/prefix");
+
+        RunCli(
+            {
+                "-v",
+                "-e", GetEndpoint(),
+                "-d", GetDatabase(),
+                "import", "s3",
+                "--bucket", TEST_BUCKET,
+                "--s3-endpoint", "https://storage.yandexcloud.net/ignored",
+                "--s3-region", "explicit",
+                "--access-key", "test-key",
+                "--secret-key", "test-access-key",
+                "--source-prefix", "source/prefix",
             }
         );
     }

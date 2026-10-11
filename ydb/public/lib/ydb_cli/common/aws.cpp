@@ -2,6 +2,8 @@
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/import/import.h>
 
+#include <util/string/cast.h>
+
 #if !defined(_win32_)
 #include <aws/core/Aws.h>
 #include <aws/core/auth/AWSCredentialsProvider.h>
@@ -71,6 +73,9 @@ public:
             throw TMisuseException() << "\"" << settings.Scheme_ << "\" scheme type is not supported";
         }
         config.useVirtualAddressing = settings.UseVirtualAddressing_;
+        if (!settings.Region_.empty()) {
+            config.region.assign(settings.Region_.data(), settings.Region_.size());
+        }
 
         Client = std::make_unique<Aws::S3::S3Client>(
             Aws::Auth::AWSCredentials(settings.AccessKey_, settings.SecretKey_),
@@ -117,5 +122,43 @@ void ShutdownAwsAPI() {
     Aws::ShutdownAPI(Aws::SDKOptions());
 }
 #endif
+
+namespace {
+
+TStringBuf S3EndpointHost(TStringBuf endpoint) {
+    TStringBuf rest = endpoint;
+    if (!rest.SkipPrefix("https://")) {
+        rest.SkipPrefix("http://");
+    }
+    rest = rest.Before('/');
+    const auto at = rest.rfind('@');
+    if (at != TStringBuf::npos) {
+        rest.Skip(at + 1);
+    }
+    if (rest.StartsWith('[')) {
+        const auto end = rest.find(']');
+        if (end != TStringBuf::npos && end > 0) {
+            return rest.SubString(1, end - 1);
+        }
+    }
+    return rest.Before(':');
+}
+
+} // namespace
+
+TString ResolveS3SigningRegion(TStringBuf endpoint, TStringBuf explicitRegion) {
+    if (explicitRegion) {
+        return TString(explicitRegion);
+    }
+
+    const TString host = to_lower(TString(S3EndpointHost(endpoint)));
+    if (host == "storage.yandexcloud.kz") {
+        return "kz1";
+    }
+    if (host == "storage.yandexcloud.net") {
+        return "ru-central1";
+    }
+    return {};
+}
 
 }
