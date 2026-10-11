@@ -95,6 +95,7 @@ private:
     DEFINE_PARSEABLE_STRUCT(TItemS3, TItemFields, Source, Destination);
 
     TString AwsEndpoint;
+    TString AwsRegion;
     ES3Scheme AwsScheme = ES3Scheme::HTTPS;
     EStorageClass AwsStorageClass = EStorageClass::NOT_SET;
     TString AwsBucket;

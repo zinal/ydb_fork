@@ -528,6 +528,18 @@ void TCommandExportToS3::Config(TConfig& config) {
     config.Opts->AddLongOption("bucket", "S3 bucket")
         .Required().RequiredArgument("BUCKET").StoreResult(&AwsBucket);
 
+    config.Opts->AddLongOption("s3-region", TStringBuilder()
+            << "Region used to sign S3 requests. "
+            << "When omitted, "
+            << colors.BoldColor() << "storage.yandexcloud.net" << colors.OldColor()
+            << " is signed as "
+            << colors.BoldColor() << "ru-central1" << colors.OldColor()
+            << " and "
+            << colors.BoldColor() << "storage.yandexcloud.kz" << colors.OldColor()
+            << " as "
+            << colors.BoldColor() << "kz1" << colors.OldColor())
+        .RequiredArgument("REGION").StoreResult(&AwsRegion);
+
     config.Opts->AddLongOption("access-key", "AWS access key id")
         .Env("AWS_ACCESS_KEY_ID", false)
         .ManualDefaultValueDescription(TStringBuilder() << colors.Cyan() << "aws_access_key_id" << colors.OldColor() << " key in AWS credentials file \"" << AwsCredentialsFile << "\"")
@@ -586,6 +598,7 @@ int TCommandExportToS3::Run(TConfig& config) {
     settings.AccessKey(AwsAccessKey);
     settings.SecretKey(AwsSecretKey);
     settings.UseVirtualAddressing(UseVirtualAddressing);
+    settings.Region(ResolveS3SigningRegion(AwsEndpoint, AwsRegion));
 
     if (CommonDestinationPrefix) {
         settings.DestinationPrefix(CommonDestinationPrefix);

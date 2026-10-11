@@ -1,4 +1,5 @@
 
+* `ydb import s3` and `ydb export s3` sign requests for Yandex Object Storage with the region that storage requires: `storage.yandexcloud.kz` uses `kz1`, and `storage.yandexcloud.net` uses `ru-central1`. Pass `--s3-region` to set another region. The selected region is also sent to the server, which uses it when reading and writing backup objects.
 * Fixed false canonical result mismatches for empty optional `String` and `Utf8` values in `ydb workload ... run --check-canonical`.
 * Fixed a memory leak when closing producers in `ydb workload topic run write|full`.
 * Sped up local YAML selector validation in `ydb admin cluster config replace` and `ydb admin database config replace` by resolving independent sections separately and merging equivalent states.

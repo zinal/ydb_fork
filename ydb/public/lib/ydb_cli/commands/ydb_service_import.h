@@ -83,6 +83,7 @@ private:
     void FillS3Settings(TSettings& settings);
 
     TString AwsEndpoint;
+    TString AwsRegion;
     ES3Scheme AwsScheme = ES3Scheme::HTTPS;
     TString AwsBucket;
     bool UseVirtualAddressing = true;

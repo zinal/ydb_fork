@@ -320,6 +320,53 @@ Y_UNIT_TEST_SUITE(ExportTest) {
         );
     }
 
+    Y_UNIT_TEST_F(PassS3Region, TExportFixture) {
+        Service<TExportImpl>()
+            .ExpectBucket(TEST_BUCKET)
+            .ExpectS3Endpoint("https://storage.yandexcloud.net")
+            .ExpectS3AccessKey("test-key")
+            .ExpectS3SecretKey("test-access-key")
+            .ExpectRegion("ru-central1")
+            .ExpectCommonDstPrefix("dst");
+
+        RunCli(
+            {
+                "-v",
+                "-e", GetEndpoint(),
+                "-d", GetDatabase(),
+                "export", "s3",
+                "--bucket", TEST_BUCKET,
+                "--s3-endpoint", "https://storage.yandexcloud.net",
+                "--access-key", "test-key",
+                "--secret-key", "test-access-key",
+                "--destination-prefix", "dst",
+            }
+        );
+
+        Service<TExportImpl>()
+            .ExpectBucket(TEST_BUCKET)
+            .ExpectS3Endpoint("https://storage.yandexcloud.kz:443")
+            .ExpectS3AccessKey("test-key")
+            .ExpectS3SecretKey("test-access-key")
+            .ExpectRegion("other")
+            .ExpectCommonDstPrefix("dst");
+
+        RunCli(
+            {
+                "-v",
+                "-e", GetEndpoint(),
+                "-d", GetDatabase(),
+                "export", "s3",
+                "--bucket", TEST_BUCKET,
+                "--s3-endpoint", "https://storage.yandexcloud.kz:443",
+                "--s3-region", "other",
+                "--access-key", "test-key",
+                "--secret-key", "test-access-key",
+                "--destination-prefix", "dst",
+            }
+        );
+    }
+
     Y_UNIT_TEST_F(PassItems, TExportFixture) {
         Service<TExportImpl>()
             .ExpectBucket(TEST_BUCKET)

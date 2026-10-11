@@ -6,6 +6,7 @@ PEERDIR(
 
 SRCS(
     completion_ut.cpp
+    s3_region_ut.cpp
 )
 
 END()

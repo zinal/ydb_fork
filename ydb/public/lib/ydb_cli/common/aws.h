@@ -79,4 +79,11 @@ std::unique_ptr<IS3ClientWrapper> CreateS3ClientWrapper(const NImport::TImportFr
 void InitAwsAPI();
 void ShutdownAwsAPI();
 
+// Signing region for an S3 request. An explicit region wins.
+// When it is empty, Yandex Object Storage endpoints are mapped to the region
+// those storages require: storage.yandexcloud.net -> ru-central1,
+// storage.yandexcloud.kz -> kz1. Any other endpoint returns an empty string
+// so the AWS SDK keeps its own default.
+TString ResolveS3SigningRegion(TStringBuf endpoint, TStringBuf explicitRegion = {});
+
 }
