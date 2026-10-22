@@ -146,8 +146,6 @@ items:
       href: workload-fulltext.md
     - name: Vector load
       href: workload-vector.md
-    - name: Replication load
-      href: workload-replication.md
   - name: Managing configuration
     href: configs.md
     include:

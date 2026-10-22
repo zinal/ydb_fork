@@ -150,8 +150,6 @@ items:
       href: workload-fulltext.md
     - name: Vector нагрузка
       href: workload-vector.md
-    - name: Replication нагрузка
-      href: workload-replication.md
   - name: Работа с конфигурацией
     href: configs.md
     include:

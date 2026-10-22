@@ -32,7 +32,6 @@ The following types of load tests are supported at the moment:
 * [Query](../../../workload-query.md): Query load test.
 * [Fulltext](../../../workload-fulltext.md): Fulltext load test.
 * [Vector](../../../workload-vector.md): Vector search load test.
-* [Replication](../../../workload-replication.md): Load test for asynchronous replication.
 
 ## Global parameters for all workloads {#global_workload_options}
 
