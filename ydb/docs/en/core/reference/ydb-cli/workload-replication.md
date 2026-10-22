@@ -34,7 +34,7 @@ Primary key columns are declared `NOT NULL`. The other columns allow `NULL`; eve
 
 A row-oriented table accepts comparable types that the storage can keep in a column. The workload uses the types from the tables below as keys. `Interval` and `Interval64` are among them: key comparison is defined for both, and a table with `Interval` in its primary key can be created. The types `TzDate`, `TzDatetime`, `TzTimestamp`, `TzDate32`, `TzDatetime64`, and `TzTimestamp64` are not stored in columns of row-oriented tables, so the schema has them neither as keys nor as values. `Float`, `Double`, `Json`, `JsonDocument`, and `Yson` are not used in the primary key; they appear among the value columns. `Uuid` in a primary key requires the server capability of the same name; the default configuration enables it. The storage also accepts `DyNumber` and comparable PostgreSQL types in a key; the schema has no columns of those types.
 
-Wide text, bytes, and JSON live in three separate tables. The other tables hold scalar values.
+Tables are divided into ordinary tables and wide tables. An ordinary table holds narrow values and has 10 columns of different types; its columns of types `Utf8`, `String`, `Json`, `JsonDocument`, and `Yson` are filled narrowly. A wide table has 30 columns of different types, plus one text column with a medium fill and one text column with a wide fill.
 
 ### Row number {#row-number}
 
@@ -60,9 +60,41 @@ The narrow types are `Bool` (2 values), `Int8` and `Uint8` (256), `Int16` and `U
 
 The other key types hold at least 2^32 distinct values. Their primary key is a single column `pk`, and it grows monotonically with `n`.
 
-### Primary key tables {#pk-tables}
+### Ordinary tables {#ordinary-tables}
 
-Each table in this section has two non-key columns, `marker Uint64` and `seqno Uint64`. Insert and update write a new value into `marker` and the operation number of that transaction into `seqno`.
+The ordinary tables are the 23 primary-key tables. Each has exactly 10 columns. The columns `seq` and `seqno` are both `Uint64`: `seq` exists only on a composite key and stores the row number, `seqno` exists on every table and stores the operation number. The other columns of one table have different types. When the key type equals the type of one value column, the table has two columns of that type.
+
+A table with a single key column has these columns:
+
+| Column | Type | Fill |
+| --- | --- | --- |
+| `pk` | the key type of this table | key of number `n` |
+| `seqno` | `Uint64` | operation number |
+| `c_bool` | `Bool` | |
+| `c_int64` | `Int64` | |
+| `c_double` | `Double` | |
+| `c_decimal` | `Decimal(22, 9)` | |
+| `c_utf8` | `Utf8` | narrow |
+| `c_string` | `String` | narrow |
+| `c_json` | `Json` | narrow |
+| `c_timestamp` | `Timestamp` | |
+
+A table with a composite key has these columns:
+
+| Column | Type | Fill |
+| --- | --- | --- |
+| `pk` | the key type of this table | first key component |
+| `seq` | `Uint64` | row number `n` |
+| `seqno` | `Uint64` | operation number |
+| `c_float` | `Float` | |
+| `c_int32` | `Int32` | |
+| `c_json_doc` | `JsonDocument` | narrow |
+| `c_yson` | `Yson` | narrow |
+| `c_uuid` | `Uuid` | |
+| `c_date32` | `Date32` | |
+| `c_interval64` | `Interval64` | |
+
+The table-to-key mapping:
 
 | Table | Primary key | Key of number `n` |
 | --- | --- | --- |
@@ -96,66 +128,76 @@ The binary and text keys are a cryptographic hash of the number, not its textual
 
 For a single-column key, `n` has to fit into the type. That is up to 2^31−1 for `Int32`, and up to the type's upper bound for `Datetime`, `Timestamp`, and `Interval`.
 
-### Value type table {#types-table}
+### Wide tables {#wide-tables}
 
-Table `types`, primary key `(id Uint64)`, the row number equals `id`. A row carries the value types, including the `Decimal` variants:
+There are five wide tables: `wide_utf8`, `wide_string`, `wide_json`, `wide_json_doc`, and `wide_yson`. The primary key of each is `(id Uint64)`, and the row number equals `id`.
+
+The thirty columns of different types are the same on all five tables. Text columns among them are filled narrowly. Each table adds two columns of its own: `c_medium` with a medium fill and `c_wide` with a wide fill. The table name sets their type.
 
 | Column | Type |
 | --- | --- |
 | `id` | `Uint64`, primary key |
-| `v_bool` | `Bool` |
-| `v_int8` | `Int8` |
-| `v_int16` | `Int16` |
-| `v_int32` | `Int32` |
-| `v_int64` | `Int64` |
-| `v_uint8` | `Uint8` |
-| `v_uint16` | `Uint16` |
-| `v_uint32` | `Uint32` |
-| `v_uint64` | `Uint64` |
-| `v_float` | `Float` |
-| `v_double` | `Double` |
-| `v_decimal` | `Decimal(22, 9)` |
-| `v_decimal_narrow` | `Decimal(1, 0)` |
-| `v_decimal_short` | `Decimal(5, 2)` |
-| `v_decimal_wide` | `Decimal(35, 0)` |
-| `v_decimal_wide_scale` | `Decimal(35, 9)` |
-| `v_decimal_max_scale` | `Decimal(35, 35)` |
-| `v_uuid` | `Uuid` |
-| `v_date` | `Date` |
-| `v_date32` | `Date32` |
-| `v_datetime` | `Datetime` |
-| `v_datetime64` | `Datetime64` |
-| `v_timestamp` | `Timestamp` |
-| `v_timestamp64` | `Timestamp64` |
-| `v_interval` | `Interval` |
-| `v_interval64` | `Interval64` |
-| `seqno` | `Uint64`, operation number |
+| `seqno` | `Uint64` |
+| `c_bool` | `Bool` |
+| `c_int8` | `Int8` |
+| `c_int16` | `Int16` |
+| `c_int32` | `Int32` |
+| `c_int64` | `Int64` |
+| `c_uint8` | `Uint8` |
+| `c_uint16` | `Uint16` |
+| `c_uint32` | `Uint32` |
+| `c_float` | `Float` |
+| `c_double` | `Double` |
+| `c_decimal` | `Decimal(22, 9)` |
+| `c_decimal_narrow` | `Decimal(1, 0)` |
+| `c_decimal_short` | `Decimal(5, 2)` |
+| `c_decimal_wide` | `Decimal(35, 0)` |
+| `c_decimal_wide_scale` | `Decimal(35, 9)` |
+| `c_decimal_max_scale` | `Decimal(35, 35)` |
+| `c_uuid` | `Uuid` |
+| `c_date` | `Date` |
+| `c_date32` | `Date32` |
+| `c_datetime` | `Datetime` |
+| `c_datetime64` | `Datetime64` |
+| `c_timestamp` | `Timestamp` |
+| `c_timestamp64` | `Timestamp64` |
+| `c_interval` | `Interval` |
+| `c_interval64` | `Interval64` |
+| `c_utf8` | `Utf8`, narrow fill |
+| `c_string` | `String`, narrow fill |
+| `c_json` | `Json`, narrow fill |
 
-`Decimal(5, 2)` is a narrow variant between `Decimal(1, 0)` and the standard `Decimal(22, 9)`. `Decimal(35, 9)` has precision 35 and scale 9. `Decimal(35, 35)` has precision 35 and scale 35.
+| Table | Type of `c_medium` and `c_wide` |
+| --- | --- |
+| `wide_utf8` | `Utf8` |
+| `wide_string` | `String` |
+| `wide_json` | `Json` |
+| `wide_json_doc` | `JsonDocument` |
+| `wide_yson` | `Yson` |
 
-A `Decimal` value is random, uses every `scale` fractional digit, and stays within `precision`. Values of the other numeric and time columns are random inside the legal range.
+`Decimal(5, 2)` is a narrow variant between `Decimal(1, 0)` and the standard `Decimal(22, 9)`. `Decimal(35, 9)` has precision 35 and scale 9. `Decimal(35, 35)` has precision 35 and scale 35. A `Decimal` value is random, uses every `scale` fractional digit, and stays within `precision`. Values of the other numeric and time columns are random inside the legal range.
 
-### Value size tables {#payload-tables}
+`id` and `seqno` are both `Uint64`. The other columns of the thirty have different types.
 
-Three tables carry text (`Utf8`), bytes (`String`), `Json`, `JsonDocument`, and `Yson` columns. The primary key is `(id Uint64)`, and the row number equals `id`.
+### Text column fill {#text-size}
 
-| Table | Class | Value size |
-| --- | --- | --- |
-| `payload_narrow` | narrow | 0 to 100 bytes inclusive |
-| `payload_medium` | medium | 100 to 500 bytes inclusive, length is random |
-| `payload_wide` | wide | 1000 to 5000 bytes inclusive, length is random |
+The text types here are `Utf8`, `String`, `Json`, `JsonDocument`, and `Yson`.
 
-Columns in all three tables: `utf8 Utf8`, `bin String`, `json Json`, `json_doc JsonDocument`, `yson Yson`, `seqno Uint64`.
+| Class | Size |
+| --- | --- |
+| narrow | 0 to 100 bytes inclusive |
+| medium | 100 to 500 bytes inclusive, length is random |
+| wide | 1000 to 5000 bytes inclusive, length is random |
 
 Size is measured as follows:
 
 * `Utf8` is the number of text bytes. The generator writes printable ASCII, so the byte count equals the character count.
 * `String` is the number of bytes. The contents are random and may be any byte sequence.
-* `Json`, `JsonDocument`, and `Yson` are the number of bytes of the text the client passes as a parameter. The document is valid. For the narrow class the lower bound is the shortest valid value: 2 bytes (`{}`) for `Json` and `JsonDocument`, 1 byte (`#`) for `Yson`. `JsonDocument` receives the same text as `Json` of the same class. The server stores `JsonDocument` in binary form, and the on-disk size may differ from the text size. `Yson` is filled using the same three size classes as `Json`.
+* `Json`, `JsonDocument`, and `Yson` are the number of bytes of the text the client passes as a parameter. The document is valid. For the narrow class the lower bound is the shortest valid value: 2 bytes (`{}`) for `Json` and `JsonDocument`, 1 byte (`#`) for `Yson`. `JsonDocument` in `c_medium` and `c_wide` receives text of the same size as `Json` of that class. The server stores `JsonDocument` in binary form, and the on-disk size may differ from the text size.
 
 The narrow class for `String` and `Utf8` includes the empty value.
 
-The directory holds 27 tables: 23 primary-key tables, `types`, and three size tables.
+The directory holds 28 tables: 23 ordinary tables and 5 wide tables.
 
 ## Indexes and partitioning {#indexes}
 
@@ -200,15 +242,15 @@ An update addresses a row that already exists. For that, every table has a bound
 
 Before the first transaction the command reads the boundary of every table from the database once.
 
-For a single-column key that grows with the number, the command reads the maximum value of the key column. In `pk_*` tables that column is named `pk`; in `types` and `payload_*` it is named `id`:
+For a single-column key that grows with the number, the command reads the maximum value of the key column. In ordinary tables that column is named `pk`; in wide tables it is named `id`:
 
 ```sql
 SELECT <key column> FROM `<table>` ORDER BY <key column> DESC LIMIT 1
 ```
 
-This covers `pk_int32`, `pk_int64`, `pk_uint32`, `pk_uint64`, `pk_decimal`, `pk_decimal_wide`, `pk_date32`, `pk_datetime`, `pk_datetime64`, `pk_timestamp`, `pk_timestamp64`, `pk_interval`, `pk_interval64`, `pk_uuid`, `types`, `payload_narrow`, `payload_medium`, and `payload_wide`.
+Ordinary tables for this query: `pk_int32`, `pk_int64`, `pk_uint32`, `pk_uint64`, `pk_decimal`, `pk_decimal_wide`, `pk_date32`, `pk_datetime`, `pk_datetime64`, `pk_timestamp`, `pk_timestamp64`, `pk_interval`, `pk_interval64`, `pk_uuid`. Wide tables: `wide_utf8`, `wide_string`, `wide_json`, `wide_json_doc`, `wide_yson`.
 
-The number is recovered from the key by the inverse of the rule in [primary key tables](#pk-tables): for integers, dates, intervals, and `Decimal` it is the numeric component of the key itself, for `Uuid` it is the low 8 bytes as big-endian, and for `types` and `payload_*` the number equals `id`. An empty result means an empty table and no boundary.
+The number is recovered from the key by the inverse of the rule in [ordinary tables](#ordinary-tables): for integers, dates, intervals, and `Decimal` it is the numeric component of the key itself, for `Uuid` it is the low 8 bytes as big-endian, and for wide tables the number equals `id`. An empty result means an empty table and no boundary.
 
 For a composite key the monotonic component is `seq`, while `pk` repeats as it cycles through the domain. The maximum of the pair `(pk, seq)` in lexicographic order is not the maximum number, so the boundary is read from `seq`:
 
