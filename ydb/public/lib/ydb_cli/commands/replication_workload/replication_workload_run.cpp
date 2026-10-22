@@ -39,56 +39,6 @@ void PrintStats(double elapsedSec, double windowSec, ui64 tx, ui64 errors) {
         << Endl;
 }
 
-i64 DecodeOrdered(EKeyKind key, TValueParser& column) {
-    switch (key) {
-        case EKeyKind::Int32:
-            return column.GetInt32();
-        case EKeyKind::Int64:
-            return column.GetInt64();
-        case EKeyKind::Uint32:
-            return column.GetUint32();
-        case EKeyKind::Uint64:
-        case EKeyKind::WideId:
-            return static_cast<i64>(column.GetUint64());
-        case EKeyKind::Decimal22_9:
-        case EKeyKind::Decimal35_0: {
-            TString text = column.GetDecimal().ToString();
-            const size_t dot = text.find('.');
-            if (dot != TString::npos) {
-                text = text.substr(0, dot);
-            }
-            if (text.empty() || text == "-") {
-                return 0;
-            }
-            return FromString<i64>(text);
-        }
-        case EKeyKind::Date32:
-            return column.GetDate32().time_since_epoch().count() + 53375809;
-        case EKeyKind::Datetime:
-            return static_cast<i64>(column.GetDatetime().Seconds());
-        case EKeyKind::Datetime64:
-            return column.GetDatetime64().time_since_epoch().count() + 4611669897600ll;
-        case EKeyKind::Timestamp:
-            return static_cast<i64>(column.GetTimestamp().MicroSeconds());
-        case EKeyKind::Timestamp64:
-            return column.GetTimestamp64().time_since_epoch().count() + 4611669897600000000ll;
-        case EKeyKind::Interval:
-            return column.GetInterval();
-        case EKeyKind::Interval64:
-            return column.GetInterval64().count();
-        case EKeyKind::Uuid: {
-            const TUuidValue uuid = column.GetUuid();
-            ui64 n = 0;
-            for (int i = 0; i < 8; ++i) {
-                n = (n << 8) | static_cast<unsigned char>(uuid.Buf_.Bytes[8 + i]);
-            }
-            return static_cast<i64>(n);
-        }
-        default:
-            ythrow yexception() << "unexpected key kind for ordered boundary";
-    }
-}
-
 i64 LoadBoundary(
     NQuery::TQueryClient& client,
     const TTable& table,
@@ -96,13 +46,10 @@ i64 LoadBoundary(
     const TDuration& timeout)
 {
     TString query;
-    if (table.HashKey) {
-        query = "SELECT COUNT(*) AS pk FROM " + QuotePath(fullName) + ";";
-    } else if (table.Composite) {
+    if (table.Composite) {
         query = "SELECT seq AS pk FROM " + QuotePath(fullName) + " ORDER BY seq DESC LIMIT 1;";
     } else {
-        const TString& key = table.Columns[0].Name;
-        query = "SELECT " + key + " AS pk FROM " + QuotePath(fullName) + " ORDER BY " + key + " DESC LIMIT 1;";
+        query = "SELECT COUNT(*) AS pk FROM " + QuotePath(fullName) + ";";
     }
     auto result = client.ExecuteQuery(
         query,
@@ -113,14 +60,31 @@ i64 LoadBoundary(
     if (!parser.TryNextRow()) {
         return -1;
     }
-    if (table.HashKey) {
-        const ui64 count = parser.ColumnParser("pk").GetUint64();
-        return count == 0 ? -1 : static_cast<i64>(count - 1);
+    const ui64 value = parser.ColumnParser("pk").GetUint64();
+    if (!table.Composite) {
+        return value == 0 ? -1 : static_cast<i64>(value - 1);
     }
-    if (table.Composite) {
-        return static_cast<i64>(parser.ColumnParser("pk").GetUint64());
+    return static_cast<i64>(value);
+}
+
+void LoadSeqnoHashes(
+    NQuery::TQueryClient& client,
+    const TString& fullName,
+    const TDuration& timeout,
+    THashMap<ui64, ui64>& hashes)
+{
+    const TString query = "SELECT seq, seqno_hash FROM " + QuotePath(fullName) + ";";
+    auto result = client.ExecuteQuery(
+        query,
+        NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW()).CommitTx(true),
+        MakeQuerySettings(timeout, timeout, timeout)).GetValueSync();
+    NStatusHelpers::ThrowOnError(result);
+    TResultSetParser parser(result.GetResultSet(0));
+    while (parser.TryNextRow()) {
+        const ui64 seq = parser.ColumnParser("seq").GetUint64();
+        const ui64 hash = parser.ColumnParser("seqno_hash").GetUint64();
+        hashes[seq] = hash;
     }
-    return DecodeOrdered(table.Key, parser.ColumnParser("pk"));
 }
 
 struct TEvent {
@@ -179,7 +143,11 @@ public:
 
     void Load(const TDuration& timeout) {
         for (size_t i = 0; i < Tables.size(); ++i) {
-            State[i].Boundary = LoadBoundary(Client, Tables[i], JoinPath(Root, Tables[i].Name), timeout);
+            const TString fullName = JoinPath(Root, Tables[i].Name);
+            State[i].Boundary = LoadBoundary(Client, Tables[i], fullName, timeout);
+            if (Tables[i].SeqnoHashPrefix) {
+                LoadSeqnoHashes(Client, fullName, timeout, State[i].SeqnoHashByRow);
+            }
         }
     }
 
@@ -302,6 +270,15 @@ private:
     void OnFinish(const TEvent& event) {
         ApplyReservations(State, event.Plan->Reservations, event.Success);
         if (event.Success) {
+            const ui64 hash = HashSeqno(event.Plan->Seqno);
+            for (const TReservation& reservation : event.Plan->Reservations) {
+                if (!Tables[reservation.TableIndex].SeqnoHashPrefix) {
+                    continue;
+                }
+                for (ui64 row = 0; row < reservation.Count; ++row) {
+                    State[reservation.TableIndex].SeqnoHashByRow[reservation.First + row] = hash;
+                }
+            }
             SuccessCount.fetch_add(1);
             WindowSuccessCount.fetch_add(1);
         } else {

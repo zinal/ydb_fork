@@ -15,6 +15,7 @@ namespace NYdb::NConsoleClient::NReplicationWorkload {
 
 TString HashBytes(ui64 n);
 TString HashHex(ui64 n);
+ui64 HashSeqno(ui64 seqno);
 
 namespace {
 
@@ -47,19 +48,22 @@ TVector<TColumn> SingleColumns(EColType pkType) {
     };
 }
 
-TVector<TColumn> CompositeColumns(EColType pkType) {
-    return {
-        Col("pk", pkType, EFill::None, true),
-        Col("seq", EColType::Uint64, EFill::None, true),
-        Col("seqno", EColType::Uint64),
-        Col("c_float", EColType::Float),
-        Col("c_int32", EColType::Int32),
-        Col("c_json_doc", EColType::JsonDocument, EFill::Narrow),
-        Col("c_yson", EColType::Yson, EFill::Narrow),
-        Col("c_uuid", EColType::Uuid),
-        Col("c_date32", EColType::Date32),
-        Col("c_interval64", EColType::Interval64),
-    };
+TVector<TColumn> CompositeColumns(EColType pkType, bool seqnoHashPrefix) {
+    TVector<TColumn> columns;
+    if (seqnoHashPrefix) {
+        columns.push_back(Col("seqno_hash", EColType::Uint64, EFill::None, true));
+    }
+    columns.push_back(Col("pk", pkType, EFill::None, true));
+    columns.push_back(Col("seq", EColType::Uint64, EFill::None, true));
+    columns.push_back(Col("seqno", EColType::Uint64));
+    columns.push_back(Col("c_float", EColType::Float));
+    columns.push_back(Col("c_int32", EColType::Int32));
+    columns.push_back(Col("c_json_doc", EColType::JsonDocument, EFill::Narrow));
+    columns.push_back(Col("c_yson", EColType::Yson, EFill::Narrow));
+    columns.push_back(Col("c_uuid", EColType::Uuid));
+    columns.push_back(Col("c_date32", EColType::Date32));
+    columns.push_back(Col("c_interval64", EColType::Interval64));
+    return columns;
 }
 
 TVector<TColumn> WideColumns(EColType textType) {
@@ -100,13 +104,14 @@ TVector<TColumn> WideColumns(EColType textType) {
     return columns;
 }
 
-TTable MakeOrdinary(const char* name, EKeyKind key, EColType pkType, bool composite, bool hash) {
+TTable MakeOrdinary(const char* name, EKeyKind key, EColType pkType, bool composite, bool hash, bool seqnoHashPrefix = false) {
     TTable table;
     table.Name = name;
     table.Key = key;
     table.Composite = composite;
     table.HashKey = hash;
-    table.Columns = composite ? CompositeColumns(pkType) : SingleColumns(pkType);
+    table.SeqnoHashPrefix = seqnoHashPrefix;
+    table.Columns = composite ? CompositeColumns(pkType, seqnoHashPrefix) : SingleColumns(pkType);
     return table;
 }
 
@@ -244,9 +249,133 @@ void SetDecimal(TBoundParam& param, EColType type, const TString& text) {
     }
 }
 
+constexpr ui64 Decimal22Span = 10000000000000ull;
+
+ui64 ReverseBits64(ui64 x) {
+    x = ((x & 0x5555555555555555ull) << 1) | ((x >> 1) & 0x5555555555555555ull);
+    x = ((x & 0x3333333333333333ull) << 2) | ((x >> 2) & 0x3333333333333333ull);
+    x = ((x & 0x0f0f0f0f0f0f0f0full) << 4) | ((x >> 4) & 0x0f0f0f0f0f0f0f0full);
+    x = ((x & 0x00ff00ff00ff00ffull) << 8) | ((x >> 8) & 0x00ff00ff00ff00ffull);
+    x = ((x & 0x0000ffff0000ffffull) << 16) | ((x >> 16) & 0x0000ffff0000ffffull);
+    return (x << 32) | (x >> 32);
+}
+
+ui32 ReverseBits32(ui32 x) {
+    return static_cast<ui32>(ReverseBits64(x) >> 32);
+}
+
+ui64 Gcd(ui64 a, ui64 b) {
+    while (b != 0) {
+        const ui64 next = a % b;
+        a = b;
+        b = next;
+    }
+    return a;
+}
+
+ui64 MulMod(ui64 a, ui64 b, ui64 mod) {
+    return static_cast<ui64>((static_cast<unsigned __int128>(a) * b) % mod);
+}
+
+ui64 ModInverse(ui64 value, ui64 mod) {
+    __int128 t = 0;
+    __int128 nextT = 1;
+    __int128 r = mod;
+    __int128 nextR = value;
+    while (nextR != 0) {
+        const __int128 quotient = r / nextR;
+        const __int128 savedT = t;
+        t = nextT;
+        nextT = savedT - quotient * nextT;
+        const __int128 savedR = r;
+        r = nextR;
+        nextR = savedR - quotient * nextR;
+    }
+    if (t < 0) {
+        t += mod;
+    }
+    return static_cast<ui64>(t);
+}
+
+struct TPerm {
+    i64 Lo = 0;
+    ui64 Span = 1;
+    ui64 Mul = 1;
+    ui64 Inv = 1;
+};
+
+TPerm MakePerm(i64 lo, i64 hi) {
+    const ui64 span = static_cast<ui64>(static_cast<__int128>(hi) - static_cast<__int128>(lo)) + 1;
+    ui64 mul = 3;
+    while (Gcd(mul, span) != 1) {
+        mul += 2;
+    }
+    return TPerm{lo, span, mul, ModInverse(mul, span)};
+}
+
+i64 Scatter(const TPerm& perm, ui64 n) {
+    if (n >= perm.Span) {
+        ythrow yexception() << "row number " << n << " does not fit the key range";
+    }
+    const ui64 mixed = MulMod(n, perm.Mul, perm.Span);
+    return static_cast<i64>(static_cast<__int128>(perm.Lo) + static_cast<__int128>(mixed));
+}
+
+const TPerm& Date32Perm() {
+    static const TPerm perm = MakePerm(MinDate32, MaxDate32);
+    return perm;
+}
+
+const TPerm& DatetimePerm() {
+    static const TPerm perm = MakePerm(0, static_cast<i64>(MaxDatetime) - 1);
+    return perm;
+}
+
+const TPerm& Datetime64Perm() {
+    static const TPerm perm = MakePerm(MinDatetime64, MaxDatetime64);
+    return perm;
+}
+
+const TPerm& TimestampPerm() {
+    static const TPerm perm = MakePerm(0, static_cast<i64>(MaxTimestamp) - 1);
+    return perm;
+}
+
+const TPerm& Timestamp64Perm() {
+    static const TPerm perm = MakePerm(MinTimestamp64, MaxTimestamp64);
+    return perm;
+}
+
+const TPerm& IntervalPerm() {
+    static const TPerm perm = MakePerm(-static_cast<i64>(MaxTimestamp) + 1, static_cast<i64>(MaxTimestamp) - 1);
+    return perm;
+}
+
+const TPerm& Interval64Perm() {
+    constexpr i64 maxInterval64 = 9223339708799999999ll;
+    static const TPerm perm = MakePerm(-maxInterval64, maxInterval64);
+    return perm;
+}
+
+const TPerm& Decimal22Perm() {
+    static const TPerm perm = MakePerm(0, static_cast<i64>(Decimal22Span) - 1);
+    return perm;
+}
+
+const TColumn& PkColumn(const TTable& table) {
+    for (const TColumn& column : table.Columns) {
+        if (column.Name == "pk" || column.Name == "id") {
+            return column;
+        }
+    }
+    return table.Columns[0];
+}
+
 TString UuidBytes(ui64 n) {
+    const ui64 mixed = HashSeqno(n);
     TString bytes(16, '\0');
     for (int i = 0; i < 8; ++i) {
+        bytes[i] = static_cast<char>((mixed >> (56 - 8 * i)) & 0xff);
         bytes[8 + i] = static_cast<char>((n >> (56 - 8 * i)) & 0xff);
     }
     return bytes;
@@ -255,7 +384,7 @@ TString UuidBytes(ui64 n) {
 TBoundParam KeyParam(const TTable& table, ui64 n, const TString& name) {
     TBoundParam param;
     param.Name = name;
-    param.SqlType = SqlType(table.Columns[0].Type);
+    param.SqlType = SqlType(PkColumn(table).Type);
     switch (table.Key) {
         case EKeyKind::Bool:
             param.Kind = EParamKind::Bool;
@@ -288,54 +417,54 @@ TBoundParam KeyParam(const TTable& table, ui64 n, const TString& name) {
             break;
         case EKeyKind::Int32:
             param.Kind = EParamKind::Int32;
-            param.I = static_cast<i64>(n);
+            param.I = static_cast<i32>(ReverseBits32(static_cast<ui32>(n)));
             break;
         case EKeyKind::Int64:
             param.Kind = EParamKind::Int64;
-            param.I = static_cast<i64>(n);
+            param.I = static_cast<i64>(ReverseBits64(n));
             break;
         case EKeyKind::Uint32:
             param.Kind = EParamKind::Uint32;
-            param.U = static_cast<ui32>(n);
+            param.U = ReverseBits32(static_cast<ui32>(n));
             break;
         case EKeyKind::Uint64:
         case EKeyKind::WideId:
             param.Kind = EParamKind::Uint64;
-            param.U = n;
+            param.U = ReverseBits64(n);
             break;
         case EKeyKind::Decimal22_9:
-            SetDecimal(param, EColType::Decimal22_9, ToString(n) + ".000000000");
+            SetDecimal(param, EColType::Decimal22_9, ToString(Scatter(Decimal22Perm(), n)) + ".000000000");
             break;
         case EKeyKind::Decimal35_0:
-            SetDecimal(param, EColType::Decimal35_0, ToString(n));
+            SetDecimal(param, EColType::Decimal35_0, ToString(ReverseBits64(n)));
             break;
         case EKeyKind::Date32:
             param.Kind = EParamKind::Date32Days;
-            param.I = static_cast<i64>(MinDate32) + static_cast<i64>(n);
+            param.I = Scatter(Date32Perm(), n);
             break;
         case EKeyKind::Datetime:
             param.Kind = EParamKind::DatetimeSeconds;
-            param.U = n;
+            param.U = static_cast<ui64>(Scatter(DatetimePerm(), n));
             break;
         case EKeyKind::Datetime64:
             param.Kind = EParamKind::Datetime64Seconds;
-            param.I = MinDatetime64 + static_cast<i64>(n);
+            param.I = Scatter(Datetime64Perm(), n);
             break;
         case EKeyKind::Timestamp:
             param.Kind = EParamKind::TimestampUs;
-            param.U = n;
+            param.U = static_cast<ui64>(Scatter(TimestampPerm(), n));
             break;
         case EKeyKind::Timestamp64:
             param.Kind = EParamKind::Timestamp64Us;
-            param.I = MinTimestamp64 + static_cast<i64>(n);
+            param.I = Scatter(Timestamp64Perm(), n);
             break;
         case EKeyKind::Interval:
             param.Kind = EParamKind::IntervalUs;
-            param.I = static_cast<i64>(n);
+            param.I = Scatter(IntervalPerm(), n);
             break;
         case EKeyKind::Interval64:
             param.Kind = EParamKind::Interval64Us;
-            param.I = static_cast<i64>(n);
+            param.I = Scatter(Interval64Perm(), n);
             break;
         case EKeyKind::Uuid:
             param.Kind = EParamKind::Uuid;
@@ -364,15 +493,12 @@ TString ColumnList(const TVector<TColumn>& columns) {
     return out;
 }
 
-TString PartitionSettings(const TTable& table, ui64 minPartitions, ui64 maxPartitions) {
+TString PartitionSettings(ui64 minPartitions, ui64 maxPartitions) {
     TStringBuilder out;
     out << "AUTO_PARTITIONING_BY_SIZE = ENABLED, "
         << "AUTO_PARTITIONING_BY_LOAD = ENABLED, "
         << "AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = " << minPartitions << ", "
         << "AUTO_PARTITIONING_MAX_PARTITIONS_COUNT = " << maxPartitions;
-    if (UsesUniformPartitions(table)) {
-        out << ", UNIFORM_PARTITIONS = " << minPartitions;
-    }
     return out;
 }
 
@@ -442,19 +568,15 @@ TString JoinPath(const TString& left, const TString& right) {
     return left + "/" + right;
 }
 
-bool UsesUniformPartitions(const TTable& table) {
-    return table.Key == EKeyKind::Uint32 || table.Key == EKeyKind::Uint64 || table.Key == EKeyKind::WideId;
-}
-
 const TVector<TTable>& AllTables() {
     static const TVector<TTable> tables = {
-        MakeOrdinary("pk_bool", EKeyKind::Bool, EColType::Bool, true, false),
+        MakeOrdinary("pk_bool", EKeyKind::Bool, EColType::Bool, true, false, true),
         MakeOrdinary("pk_int8", EKeyKind::Int8, EColType::Int8, true, false),
         MakeOrdinary("pk_uint8", EKeyKind::Uint8, EColType::Uint8, true, false),
         MakeOrdinary("pk_int16", EKeyKind::Int16, EColType::Int16, true, false),
         MakeOrdinary("pk_uint16", EKeyKind::Uint16, EColType::Uint16, true, false),
         MakeOrdinary("pk_date", EKeyKind::Date, EColType::Date, true, false),
-        MakeOrdinary("pk_decimal_narrow", EKeyKind::Decimal1_0, EColType::Decimal1_0, true, false),
+        MakeOrdinary("pk_decimal_narrow", EKeyKind::Decimal1_0, EColType::Decimal1_0, true, false, true),
         MakeOrdinary("pk_int32", EKeyKind::Int32, EColType::Int32, false, false),
         MakeOrdinary("pk_int64", EKeyKind::Int64, EColType::Int64, false, false),
         MakeOrdinary("pk_uint32", EKeyKind::Uint32, EColType::Uint32, false, false),
@@ -491,15 +613,22 @@ TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minP
         out << ", ";
     }
     out << "PRIMARY KEY (";
-    out << table.Columns[0].Name;
-    if (table.Composite) {
-        out << ", seq";
+    bool firstKey = true;
+    for (const TColumn& column : table.Columns) {
+        if (!column.Key) {
+            continue;
+        }
+        if (!firstKey) {
+            out << ", ";
+        }
+        out << column.Name;
+        firstKey = false;
     }
     out << "), INDEX seqno_idx GLOBAL SYNC ON (seqno)";
     if (table.Composite) {
         out << ", INDEX seq_idx GLOBAL SYNC ON (seq)";
     }
-    out << ") WITH (" << PartitionSettings(table, minPartitions, maxPartitions) << ")";
+    out << ") WITH (" << PartitionSettings(minPartitions, maxPartitions) << ")";
     return out;
 }
 
@@ -517,6 +646,13 @@ TVector<TString> AlterIndexQueries(const TString& fullName, const TTable& table,
             << " ALTER INDEX `seq_idx` SET (" << settings << ")");
     }
     return queries;
+}
+
+ui64 HashSeqno(ui64 seqno) {
+    ui64 x = seqno + 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
 }
 
 TString HashBytes(ui64 n) {
@@ -693,16 +829,24 @@ TBoundParam MakeValue(const TColumn& column, std::mt19937_64& rng) {
     return param;
 }
 
-TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, const TString& namePrefix) {
+TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, const TString& namePrefix) {
     TVector<TBoundParam> params;
-    params.push_back(KeyParam(table, n, namePrefix + table.Columns[0].Name));
+    if (table.SeqnoHashPrefix) {
+        TBoundParam hash;
+        hash.Name = namePrefix + "seqno_hash";
+        hash.SqlType = "Uint64";
+        hash.Kind = EParamKind::Uint64;
+        hash.U = seqnoHash;
+        params.push_back(std::move(hash));
+    }
+    params.push_back(KeyParam(table, n, namePrefix + PkColumn(table).Name));
     if (table.Composite) {
         TBoundParam seq;
         seq.Name = namePrefix + "seq";
         seq.SqlType = "Uint64";
         seq.Kind = EParamKind::Uint64;
         seq.U = n;
-        params.push_back(seq);
+        params.push_back(std::move(seq));
     }
     return params;
 }
@@ -716,7 +860,7 @@ TRowWrite MakeInsertWrite(
     std::mt19937_64& rng)
 {
     TRowWrite write;
-    TVector<TBoundParam> params = MakeKeyParams(table, n, prefix);
+    TVector<TBoundParam> params = MakeKeyParams(table, n, HashSeqno(seqno), prefix);
     for (const TColumn& column : table.Columns) {
         if (column.Key) {
             continue;
@@ -911,14 +1055,24 @@ TTxPlan BuildTransaction(
                 params.push_back(std::move(value));
             }
             sql << " WHERE ";
-            TVector<TBoundParam> keys = MakeKeyParams(table, number, prefix);
-            for (size_t i = 0; i < keys.size(); ++i) {
-                if (i) {
+            ui64 seqnoHash = HashSeqno(0);
+            if (table.SeqnoHashPrefix) {
+                if (const ui64* found = state[item.Index].SeqnoHashByRow.FindPtr(number)) {
+                    seqnoHash = *found;
+                }
+            }
+            TVector<TBoundParam> keys = MakeKeyParams(table, number, seqnoHash, prefix);
+            size_t keyIndex = 0;
+            for (const TColumn& column : table.Columns) {
+                if (!column.Key) {
+                    continue;
+                }
+                if (keyIndex != 0) {
                     sql << " AND ";
                 }
-                const TString columnName = i == 0 ? table.Columns[0].Name : TString("seq");
-                sql << columnName << " = $" << keys[i].Name;
-                params.push_back(std::move(keys[i]));
+                sql << column.Name << " = $" << keys[keyIndex].Name;
+                params.push_back(std::move(keys[keyIndex]));
+                ++keyIndex;
             }
             sql << ";";
             write.Statement = sql;

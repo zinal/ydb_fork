@@ -1,4 +1,4 @@
-* Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests.
+* Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests. Monotonic primary keys are reversibly scattered across the key range. `Bool` and `Decimal(1, 0)` keys are prefixed with a hash of `seqno`. Tables are not pre-split.
 * Added `ydb admin bridge remove-pile` command to remove a DISCONNECTED pile from a bridged cluster along with all its data (asks for confirmation unless `-y` is given).
 * Added `ydb admin bridge add-pile` command to add a pile listed in the bridge config to a running bridged cluster, and the pending pile operation to the output of `ydb admin bridge list`.
 

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <util/generic/hash.h>
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
 #include <util/system/types.h>
@@ -98,6 +99,7 @@ struct TTable {
     EKeyKind Key = EKeyKind::Uint64;
     bool Composite = false;
     bool HashKey = false;
+    bool SeqnoHashPrefix = false;
     bool Wide = false;
     ETextType WideText = ETextType::None;
     TVector<TColumn> Columns;
@@ -156,6 +158,9 @@ struct TReservation {
 struct TTableRuntime {
     i64 Boundary = -1;
     bool InsertBusy = false;
+    // Row number -> seqno_hash written when the row was inserted.
+    // Used by Bool and Decimal(1, 0), whose primary key starts with that hash.
+    THashMap<ui64, ui64> SeqnoHashByRow;
 };
 
 struct TTxPlan {
@@ -174,13 +179,13 @@ TString JoinPath(const TString& left, const TString& right);
 
 TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minPartitions, ui64 maxPartitions);
 TVector<TString> AlterIndexQueries(const TString& fullName, const TTable& table, ui64 minPartitions, ui64 maxPartitions);
-bool UsesUniformPartitions(const TTable& table);
 
+ui64 HashSeqno(ui64 seqno);
 TString HashBytes(ui64 n);
 TString HashHex(ui64 n);
 TString MakeText(EColType type, EFill fill, std::mt19937_64& rng);
 TBoundParam MakeValue(const TColumn& column, std::mt19937_64& rng);
-TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, const TString& namePrefix);
+TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, const TString& namePrefix);
 
 TRowWrite MakeInsertWrite(
     const TTable& table,
