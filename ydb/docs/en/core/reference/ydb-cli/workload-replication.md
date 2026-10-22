@@ -34,11 +34,11 @@ Primary key columns are declared `NOT NULL`. The other columns allow `NULL`; eve
 
 A row-oriented table accepts comparable types that the storage can keep in a column. The workload uses the types from the tables below as keys. `Interval` and `Interval64` are among them: key comparison is defined for both, and a table with `Interval` in its primary key can be created. The types `TzDate`, `TzDatetime`, `TzTimestamp`, `TzDate32`, `TzDatetime64`, and `TzTimestamp64` are not stored in columns of row-oriented tables, so the schema has them neither as keys nor as values. `Float`, `Double`, `Json`, `JsonDocument`, and `Yson` are not used in the primary key; they appear among the value columns. `Uuid` in a primary key requires the server capability of the same name; the default configuration enables it. The storage also accepts `DyNumber` and comparable PostgreSQL types in a key; the schema has no columns of those types.
 
-Tables are divided into ordinary tables and wide tables. An ordinary table holds narrow values and has 10 columns of different types; its columns of types `Utf8`, `String`, `Json`, `JsonDocument`, and `Yson` are filled narrowly. A wide table has 30 columns of different types, plus one text column with a medium fill and one text column with a wide fill.
+Tables are divided into ordinary tables and wide tables. An ordinary table holds narrow values. `pk_bool` and `pk_decimal_narrow` have 11 columns; the other ordinary tables have 10. Columns of types `Utf8`, `String`, `Json`, `JsonDocument`, and `Yson` in an ordinary table are filled narrowly. A wide table has 30 columns of different types, plus one text column with a medium fill and one text column with a wide fill.
 
 ### Row number {#row-number}
 
-Every row of a table has a number `n`, an integer starting at 0. The primary key is a pure function of `n`, and different numbers produce different keys. After `import` the table holds numbers `0 .. Q-1`. `run` appends the following numbers.
+Every row of a table has a number `n`, an integer starting at 0. After `import` the table holds numbers `0 .. Q-1`. `run` appends the following numbers. The primary key is fixed at insert. On every table except `pk_bool` and `pk_decimal_narrow` it is computed from `n`, and different numbers produce different keys. On those two tables the first component is the hash of the `seqno` written by the insert, and `seq` equals `n`, so different numbers produce different keys there as well.
 
 ### seqno column {#seqno}
 
@@ -54,15 +54,28 @@ When `run` starts, the counter is set to the current Unix time in microseconds: 
 
 ### Composite key of a narrow type {#composite-key}
 
-When a type has fewer than 2^32 distinct values, one column of that type is not enough: once the domain is exhausted, a new row cannot be inserted. The primary key of such a table is `(pk <type>, seq Uint64)`. The second component is always `Uint64` and equals the number `n`. The first column walks the whole domain of the type: `pk` is derived from `n % <domain size>`.
+When a type has fewer than 2^32 distinct values, one column of that type is not enough: once the domain is exhausted, a new row cannot be inserted. For `Int8`, `Uint8`, `Int16`, `Uint16`, and `Date` the primary key is `(pk <type>, seq Uint64)`. The second component is always `Uint64` and equals the number `n`. The first column walks the whole domain of the type: `pk` is derived from `n % <domain size>`.
 
-The narrow types are `Bool` (2 values), `Int8` and `Uint8` (256), `Int16` and `Uint16` (65536), `Date` (days from 1970-01-01 through 2105-12-31), and `Decimal(1, 0)` (values from −9 to 9).
+The narrow types are `Bool` (2 values), `Int8` and `Uint8` (256), `Int16` and `Uint16` (65536), `Date` (days from 1970-01-01 through 2105-12-31, 49673 values), and `Decimal(1, 0)` (values from −9 to 9).
 
-The other key types hold at least 2^32 distinct values. Their primary key is a single column `pk`, and it grows monotonically with `n`.
+For `Bool` and `Decimal(1, 0)` the key is preceded by `seqno_hash Uint64 NOT NULL`. The primary key of these two tables is `(seqno_hash, pk <type>, seq Uint64)`. `seqno_hash` is the hash of the `seqno` of the transaction that inserted the row. `pk` is derived from `n % <domain size>`, and `seq` equals `n`.
+
+The hash is computed in unsigned 64-bit arithmetic. Addition and multiplication wrap modulo 2^64, and the right shift is logical:
+
+```
+x = seqno + 0x9e3779b97f4a7c15
+x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+seqno_hash = x ^ (x >> 31)
+```
+
+`import` writes `seqno` equal to 0, so every initially loaded row of `pk_bool` and `pk_decimal_narrow` has the same `seqno_hash`, the hash of zero. Each new `run` transaction receives its own `seqno`, and inserts of that transaction into these two tables receive the hash of that `seqno`. A later write to the `seqno` column keeps `seqno_hash` equal to the hash from the insert. The `WHERE` clause of an update compares this stored hash. At the start of `run` the command reads `SELECT seq, seqno_hash` and remembers the hash of every number already written. A successful insert of the same run adds the hash of its `seqno` for the new numbers to that memory. The `seqno_hash` column is not part of a secondary index.
+
+The other key types are stored in a single column. In ordinary tables it is named `pk`; in wide tables it is named `id`. The value is a reversible mix of the number `n` over the legal range of the type, so consecutive numbers land in different parts of the key order.
 
 ### Ordinary tables {#ordinary-tables}
 
-The ordinary tables are the 23 primary-key tables. Each has exactly 10 columns. The columns `seq` and `seqno` are both `Uint64`: `seq` exists only on a composite key and stores the row number, `seqno` exists on every table and stores the operation number. The other columns of one table have different types. When the key type equals the type of one value column, the table has two columns of that type.
+The ordinary tables are the 23 primary-key tables. `pk_bool` and `pk_decimal_narrow` have 11 columns; the other ordinary tables have 10. The columns `seq` and `seqno` are both `Uint64`: `seq` exists only on a composite key and stores the row number, `seqno` exists on every table and stores the operation number. The other columns of one table have different types. When the key type equals the type of one value column, the table has two columns of that type.
 
 A table with a single key column has these columns:
 
@@ -94,31 +107,33 @@ A table with a composite key has these columns:
 | `c_date32` | `Date32` | |
 | `c_interval64` | `Interval64` | |
 
+On `pk_bool` and `pk_decimal_narrow` the column `seqno_hash Uint64 NOT NULL` precedes `pk`. It is part of the primary key and is filled with the hash of the insert `seqno`.
+
 The table-to-key mapping:
 
 | Table | Primary key | Key of number `n` |
 | --- | --- | --- |
-| `pk_bool` | `(pk Bool, seq Uint64)` | `pk = (n % 2 = 1)`, `seq = n` |
+| `pk_bool` | `(seqno_hash Uint64, pk Bool, seq Uint64)` | `seqno_hash` is the hash of the insert `seqno`, `pk = (n % 2 = 1)`, `seq = n` |
 | `pk_int8` | `(pk Int8, seq Uint64)` | `pk = (n % 256) − 128`, `seq = n` |
 | `pk_uint8` | `(pk Uint8, seq Uint64)` | `pk = n % 256`, `seq = n` |
 | `pk_int16` | `(pk Int16, seq Uint64)` | `pk` is the signed 16-bit representation of `n % 65536`, `seq = n` |
 | `pk_uint16` | `(pk Uint16, seq Uint64)` | `pk = n % 65536`, `seq = n` |
 | `pk_date` | `(pk Date, seq Uint64)` | `pk` cycles through every valid `Date`, `seq = n` |
-| `pk_decimal_narrow` | `(pk Decimal(1, 0), seq Uint64)` | `pk = (n % 19) − 9`, `seq = n` |
-| `pk_int32` | `(pk Int32)` | `pk = n` |
-| `pk_int64` | `(pk Int64)` | `pk = n` |
-| `pk_uint32` | `(pk Uint32)` | `pk = n` |
-| `pk_uint64` | `(pk Uint64)` | `pk = n` |
-| `pk_decimal` | `(pk Decimal(22, 9))` | the integer part is `n`, nine fractional digits are zero |
-| `pk_decimal_wide` | `(pk Decimal(35, 0))` | `pk = n` |
-| `pk_date32` | `(pk Date32)` | a shift of `n` days from the start of the range |
-| `pk_datetime` | `(pk Datetime)` | `n` seconds from the start of the range |
-| `pk_datetime64` | `(pk Datetime64)` | `n` seconds from the start of the range |
-| `pk_timestamp` | `(pk Timestamp)` | `n` microseconds from the start of the range |
-| `pk_timestamp64` | `(pk Timestamp64)` | `n` microseconds from the start of the range |
-| `pk_interval` | `(pk Interval)` | an interval of `n` microseconds |
-| `pk_interval64` | `(pk Interval64)` | an interval of `n` microseconds |
-| `pk_uuid` | `(pk Uuid)` | 16 bytes: the high 8 bytes are zero, the low 8 bytes are `n` in big-endian |
+| `pk_decimal_narrow` | `(seqno_hash Uint64, pk Decimal(1, 0), seq Uint64)` | `seqno_hash` is the hash of the insert `seqno`, `pk = (n % 19) − 9`, `seq = n` |
+| `pk_int32` | `(pk Int32)` | the 32-bit reversal of `n`, read as signed |
+| `pk_int64` | `(pk Int64)` | the 64-bit reversal of `n`, read as signed |
+| `pk_uint32` | `(pk Uint32)` | the 32-bit reversal of `n` |
+| `pk_uint64` | `(pk Uint64)` | the 64-bit reversal of `n` |
+| `pk_decimal` | `(pk Decimal(22, 9))` | the integer part is `n` mixed into `0 .. 10^13−1`, nine fractional digits are zero |
+| `pk_decimal_wide` | `(pk Decimal(35, 0))` | the 64-bit reversal of `n` as a non-negative integer |
+| `pk_date32` | `(pk Date32)` | `n` mixed over the `Date32` range |
+| `pk_datetime` | `(pk Datetime)` | `n` mixed over the `Datetime` range |
+| `pk_datetime64` | `(pk Datetime64)` | `n` mixed over the `Datetime64` range |
+| `pk_timestamp` | `(pk Timestamp)` | `n` mixed over the `Timestamp` range |
+| `pk_timestamp64` | `(pk Timestamp64)` | `n` mixed over the `Timestamp64` range |
+| `pk_interval` | `(pk Interval)` | `n` mixed over the `Interval` range |
+| `pk_interval64` | `(pk Interval64)` | `n` mixed over the `Interval64` range |
+| `pk_uuid` | `(pk Uuid)` | the high 8 bytes are the hash of `n` in big-endian, the low 8 bytes are `n` in big-endian |
 | `pk_string` | `(pk String)` | SHA-256 of the 8 little-endian bytes of `n`; the key is the 32-byte digest |
 | `pk_utf8` | `(pk Utf8)` | the same SHA-256; the key is 64 characters of its lowercase hexadecimal form |
 
@@ -126,11 +141,34 @@ The table-to-key mapping:
 
 The binary and text keys are a cryptographic hash of the number, not its textual representation. The order of these keys in the table does not follow the order of the numbers.
 
-For a single-column key, `n` has to fit into the type. That is up to 2^31−1 for `Int32`, and up to the type's upper bound for `Datetime`, `Timestamp`, and `Interval`.
+Bit reversal reorders the bits of the number: bit `i` of the result equals bit `width − 1 − i` of the number. For `Int32` and `Uint32` the width is 32, and the number has to be less than 2^32; the `Int32` bit string is read as a signed value. For `Int64`, `Uint64`, the wide-table `id`, and `Decimal(35, 0)` the width is 64. For `Decimal(35, 0)` the bit string is read as a non-negative integer.
+
+Mixing over an inclusive integer range `[lo, hi]` is defined as follows:
+
+```
+span = hi − lo + 1
+A is the smallest odd positive integer coprime to span
+value = lo + ((n * A) mod span)
+```
+
+The number has to be less than `span`. For the ranges below, `A` is already computed:
+
+| Type | `lo` | `hi` | `A` |
+| --- | --- | --- | --- |
+| `Date32` | −53375809 | 53375807 | 3 |
+| `Datetime` | 0 | `86400 * 49673 − 1` | 7 |
+| `Datetime64` | −4611669897600 | 4611669811199 | 11 |
+| `Timestamp` | 0 | `86400000000 * 49673 − 1` | 7 |
+| `Timestamp64` | −4611669897600000000 | 4611669811199999999 | 11 |
+| `Interval` | `−(86400000000 * 49673 − 1)` | `86400000000 * 49673 − 1` | 3 |
+| `Interval64` | −9223339708799999999 | 9223339708799999999 | 3 |
+| integer part of `Decimal(22, 9)` | 0 | `10^13 − 1` | 3 |
+
+For `Uuid`, the high 8 bytes are the same hash as `seqno_hash`, computed from the number `n` and stored big-endian. The low 8 bytes are the number `n` in big-endian.
 
 ### Wide tables {#wide-tables}
 
-There are five wide tables: `wide_utf8`, `wide_string`, `wide_json`, `wide_json_doc`, and `wide_yson`. The primary key of each is `(id Uint64)`, and the row number equals `id`.
+There are five wide tables: `wide_utf8`, `wide_string`, `wide_json`, `wide_json_doc`, and `wide_yson`. The primary key of each is `(id Uint64)`. The row number is `n`, and `id` is the 64-bit reversal of `n`, the same value as in `pk_uint64`.
 
 The thirty columns of different types are the same on all five tables. Text columns among them are filled narrowly. Each table adds two columns of its own: `c_medium` with a medium fill and `c_wide` with a wide fill. The table name sets their type.
 
@@ -218,15 +256,15 @@ AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1000,
 AUTO_PARTITIONING_MAX_PARTITIONS_COUNT = 1100
 ```
 
-On a table these parameters are set in `WITH` at creation. When the first primary-key column has type `Uint32` or `Uint64`, `UNIFORM_PARTITIONS` is also set to the minimum, so the table is created with that many partitions. For any other type of the first column, uniform initial splitting is not available and the table is created with one partition; after that the partition count changes automatically and stays within the configured minimum and maximum.
+On a table these parameters are set in `WITH` at creation. The table is created with one partition. The command does not pre-split it. Automatic partitioning then brings the partition count up to the configured minimum and keeps it at or below the configured maximum.
 
-Index partitioning parameters are not set when the index is created. `init` creates the index and then runs `ALTER TABLE … ALTER INDEX … SET` with the same four parameters. `UNIFORM_PARTITIONS` is not set on an index.
+Index partitioning parameters are not set when the index is created. `init` creates the index and then runs `ALTER TABLE … ALTER INDEX … SET` with the same four parameters. The indexes `seqno_idx` and `seq_idx` are built on the columns `seqno` and `seq` and are created without a pre-split.
 
 If the minimum is greater than the maximum, `init` fails with a parameter error and does not create the tables.
 
 ## Initial fill {#import}
 
-`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. A load batch is idempotent: a retry writes the same keys with the same `UPSERT` and `seqno` 0.
+`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. On `pk_bool` and `pk_decimal_narrow` the `seqno_hash` column of the load equals the hash of zero. A load batch is idempotent: a retry writes the same keys with the same `UPSERT` and `seqno` 0.
 
 The command finishes after all of these rows are committed. Rows of one table may be written by several transactions; the batch size does not affect the `run` scenario.
 
@@ -242,31 +280,29 @@ An update addresses a row that already exists. For that, every table has a bound
 
 Before the first transaction the command reads the boundary of every table from the database once.
 
-For a single-column key that grows with the number, the command reads the maximum value of the key column. In ordinary tables that column is named `pk`; in wide tables it is named `id`:
-
-```sql
-SELECT <key column> FROM `<table>` ORDER BY <key column> DESC LIMIT 1
-```
-
-Ordinary tables for this query: `pk_int32`, `pk_int64`, `pk_uint32`, `pk_uint64`, `pk_decimal`, `pk_decimal_wide`, `pk_date32`, `pk_datetime`, `pk_datetime64`, `pk_timestamp`, `pk_timestamp64`, `pk_interval`, `pk_interval64`, `pk_uuid`. Wide tables: `wide_utf8`, `wide_string`, `wide_json`, `wide_json_doc`, `wide_yson`.
-
-The number is recovered from the key by the inverse of the rule in [ordinary tables](#ordinary-tables): for integers, dates, intervals, and `Decimal` it is the numeric component of the key itself, for `Uuid` it is the low 8 bytes as big-endian, and for wide tables the number equals `id`. An empty result means an empty table and no boundary.
-
-For a composite key the monotonic component is `seq`, while `pk` repeats as it cycles through the domain. The maximum of the pair `(pk, seq)` in lexicographic order is not the maximum number, so the boundary is read from `seq`:
+For a composite key the number is stored in `seq`. These tables are `pk_bool`, `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, `pk_date`, and `pk_decimal_narrow`. The boundary is read as follows:
 
 ```sql
 SELECT seq FROM `<table>` ORDER BY seq DESC LIMIT 1
 ```
 
-The returned `seq` is the maximum number.
+The returned `seq` is the maximum number. An empty result means an empty table and no boundary.
 
-For `pk_string` and `pk_utf8` the key is a hash. `ORDER BY pk` shows the maximum hash, not the maximum number. The number of rows already written equals the count of numbers `0 .. boundary`, so the boundary is read as follows:
+For `pk_bool` and `pk_decimal_narrow` the command also reads the insert hash:
+
+```sql
+SELECT seq, seqno_hash FROM `<table>`
+```
+
+An update of a row uses the `seqno_hash` from this read. A row written by `import` has the hash of zero.
+
+For the other tables the key is a mix or a hash of the number. The number of rows already written equals the count of numbers `0 .. boundary`, so the boundary is read as follows:
 
 ```sql
 SELECT COUNT(*) FROM `<table>`
 ```
 
-If the query returns `C`, the maximum number is `C − 1` and the next free number is `C`. Zero means an empty table.
+If the query returns `C`, the maximum number is `C − 1` and the next free number is `C`. Zero means an empty table. This query is used for every single-column ordinary table, including `pk_string` and `pk_utf8`, and for every wide table.
 
 This read is valid while the table contains only rows of this workload and their numbers form a contiguous prefix `0 .. boundary`. How that prefix is preserved is described below.
 
@@ -276,7 +312,7 @@ The boundary is kept in the process memory and moves forward when a transaction 
 
 At most one transaction at a time reserves and commits new numbers of a given table. A transaction that needs inserts into several tables locks those tables in name order and holds the locks until the commit finishes, so users do not deadlock. A retried transaction uses the numbers it already reserved. A number joins the boundary only after a successful commit. Until the transaction commits, updates do not select these numbers.
 
-Committed numbers of a table therefore always form a contiguous run from 0 through the current boundary. The next `run` reads the same boundary with the same `ORDER BY … DESC LIMIT 1` or `COUNT(*)` query. If the process stops before the commit, the server rolls the unfinished transaction back, and the prefix has no hole.
+Committed numbers of a table therefore always form a contiguous run from 0 through the current boundary. The next `run` reads the same boundary with the same query: `ORDER BY seq DESC LIMIT 1` for a composite key and `COUNT(*)` for the other tables. If the process stops before the commit, the server rolls the unfinished transaction back, and the prefix has no hole.
 
 An update picks a number uniformly from `0 .. boundary` inclusive, using the boundary as it was at the start of the transaction. Numbers chosen for update inside one transaction are distinct when there are no more of them than `boundary + 1`. When more updates are planned than rows already exist, the extra updates become inserts and receive the next numbers.
 
@@ -288,7 +324,7 @@ The number of affected tables **M** is chosen uniformly from 1 to the number of 
 
 The transaction writes **R** rows into every selected table. R is chosen uniformly from 1 to **K** inclusive. K is the `--max-records` parameter. Of these R rows, `floor(R / 2)` are planned as inserts and the rest as updates. R = 1 yields one update. R = 2 yields one insert and one update. When fewer rows exist than updates were planned, the missing updates are performed as inserts. In an empty table all R rows are inserts.
 
-An insert fills every column and is performed with `UPSERT`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. The `WHERE` clause contains every primary-key column and compares it for equality: `pk` for a single-column key, and both `pk` and `seq` for a composite key.
+An insert fills every column and is performed with `UPSERT`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `seqno_hash`, `pk`, and `seq`. The `seqno_hash` value is the hash written when the row was inserted.
 
 The transaction is idempotent and runs in the client retry handler with the idempotent flag set. Primary keys, the columns chosen for update, their new values, and `seqno` are fixed before the first attempt. Every attempt sends the same statements with the same parameters. A repeated `UPSERT` after a commit whose response the client did not see writes the same rows and does not fail with a primary key conflict. A repeated `UPDATE` writes the same columns for the same full primary key. The handler retries statuses that are safe to retry for an idempotent operation, including when the outcome of an attempt is unknown. A retry allocates neither new row numbers, nor a new `seqno`, nor a different set of columns.
 
