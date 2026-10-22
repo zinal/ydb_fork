@@ -40,6 +40,18 @@ Wide text, bytes, and JSON live in three separate tables. The other tables hold 
 
 Every row of a table has a number `n`, an integer starting at 0. The primary key is a pure function of `n`, and different numbers produce different keys. After `import` the table holds numbers `0 .. Q-1`. `run` appends the following numbers.
 
+### seqno column {#seqno}
+
+Every table has a column `seqno Uint64 NOT NULL`. It is not part of the primary key. The `seq` column of a narrow key is the row number `n`. The `seqno` column is the operation number, one value across all tables.
+
+Every row of every table that one transaction inserts or updates is written with the same `seqno`.
+
+The number comes from an atomic transaction counter in the command process. The counter advances when the transaction is formed. A retry of that transaction keeps the same value.
+
+On the initial `import` load every written row has `seqno` equal to 0. The load does not advance the counter.
+
+When `run` starts, the counter is set to the current Unix time: the integer number of UTC seconds since 1970-01-01. The first transaction of that run receives this value, and each following new transaction receives the next integer. A later `run` again sets the counter to the Unix time of its own start.
+
 ### Composite key of a narrow type {#composite-key}
 
 When a type has fewer than 2^32 distinct values, one column of that type is not enough: once the domain is exhausted, a new row cannot be inserted. The primary key of such a table is `(pk <type>, seq Uint64)`. The second component is always `Uint64` and equals the number `n`. The first column walks the whole domain of the type: `pk` is derived from `n % <domain size>`.
@@ -50,7 +62,7 @@ The other key types hold at least 2^32 distinct values. Their primary key is a s
 
 ### Primary key tables {#pk-tables}
 
-Each table in this section has one non-key column, `marker Uint64`. Insert and update write a new value there.
+Each table in this section has two non-key columns, `marker Uint64` and `seqno Uint64`. Insert and update write a new value into `marker` and the operation number of that transaction into `seqno`.
 
 | Table | Primary key | Key of number `n` |
 | --- | --- | --- |
@@ -118,6 +130,7 @@ Table `types`, primary key `(id Uint64)`, the row number equals `id`. A row carr
 | `v_interval` | `Interval` |
 | `v_interval64` | `Interval64` |
 | `v_yson` | `Yson` |
+| `seqno` | `Uint64`, operation number |
 
 `Decimal(5, 2)` is a narrow variant between `Decimal(1, 0)` and the standard `Decimal(22, 9)`. `Decimal(35, 9)` has precision 35 and scale 9. `Decimal(35, 35)` has precision 35 and scale 35.
 
@@ -133,7 +146,7 @@ Three tables carry text (`Utf8`), bytes (`String`), `Json`, and `JsonDocument` c
 | `payload_medium` | medium | 100 to 500 bytes inclusive, length is random |
 | `payload_wide` | wide | 1000 to 5000 bytes inclusive, length is random |
 
-Columns in all three tables: `utf8 Utf8`, `bin String`, `json Json`, `json_doc JsonDocument`.
+Columns in all three tables: `utf8 Utf8`, `bin String`, `json Json`, `json_doc JsonDocument`, `seqno Uint64`.
 
 Size is measured as follows:
 
@@ -147,11 +160,11 @@ The directory holds 27 tables: 23 primary-key tables, `types`, and three size ta
 
 ## Initial fill {#import}
 
-`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above.
+`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. A load batch is idempotent: a retry writes the same keys with the same `UPSERT` and `seqno` 0.
 
 The command finishes after all of these rows are committed. Rows of one table may be written by several transactions; the batch size does not affect the `run` scenario.
 
-A repeated `import` into a non-empty table conflicts on the primary key and fails the command. The working order is one `import` after `init`.
+A repeated `import` when rows are already present fails the command and does not rewrite the table. The working order is one `import` after `init`.
 
 With Q = 0 the tables stay empty. The first `run` transactions then consist of inserts, until the table has at least one committed row.
 
@@ -209,9 +222,11 @@ The number of affected tables **M** is chosen uniformly from 1 to the number of 
 
 The transaction writes **R** rows into every selected table. R is chosen uniformly from 1 to **K** inclusive. K is the `--max-records` parameter. Of these R rows, `floor(R / 2)` are planned as inserts and the rest as updates. R = 1 yields one update. R = 2 yields one insert and one update. When fewer rows exist than updates were planned, the missing updates are performed as inserts. In an empty table all R rows are inserts.
 
-An insert fills every column. An update rewrites every non-key column and leaves the primary key unchanged.
+An insert fills every column. An update rewrites every non-key column and leaves the primary key unchanged. Both the insert and the update write the `seqno` of this transaction.
 
-A transaction counts as successful after the client retries. Retriable failures that the client retries on its own are not included in the error rate when the final attempt succeeds. A retry uses the same reserved numbers. The error rate includes a transaction whose last attempt failed. One such transaction is one error, regardless of how many tables it contains. Its numbers do not join the boundary. After the failure the table locks are released, and the next insert into the same table again takes numbers starting at `boundary + 1`.
+The transaction is idempotent and runs in the client retry handler with the idempotent flag set. Primary keys, all column values, and `seqno` are fixed before the first attempt. Every attempt sends the same writes with the same parameters. Both new rows and updates of existing rows are written with `UPSERT`: a retry after a commit whose response the client did not see writes the same values and does not fail with a primary key conflict. The handler retries statuses that are safe to retry for an idempotent operation, including when the outcome of an attempt is unknown. A retry allocates neither new row numbers nor a new `seqno`.
+
+A transaction counts as successful after this handler. Retriable failures are not included in the error rate when the final attempt succeeds. The error rate includes a transaction whose last attempt failed. One such transaction is one error, regardless of how many tables it contains. Its row numbers do not join the boundary, and its `seqno` is not reused. After the failure the table locks are released, and the next insert into the same table again takes row numbers starting at `boundary + 1`.
 
 ## Concurrency {#concurrency}
 
