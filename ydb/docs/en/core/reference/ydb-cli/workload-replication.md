@@ -50,7 +50,7 @@ The number comes from an atomic transaction counter in the command process. The 
 
 On the initial `import` load every written row has `seqno` equal to 0. The load does not advance the counter.
 
-When `run` starts, the counter is set to the current Unix time: the integer number of UTC seconds since 1970-01-01. The first transaction of that run receives this value, and each following new transaction receives the next integer. A later `run` again sets the counter to the Unix time of its own start.
+When `run` starts, the counter is set to the current Unix time in microseconds: the integer number of UTC microseconds since 1970-01-01. The first transaction of that run receives this value, and each following new transaction receives the next integer. A later `run` again sets the counter to the Unix time of its own start, also in microseconds.
 
 ### Composite key of a narrow type {#composite-key}
 
@@ -129,16 +129,15 @@ Table `types`, primary key `(id Uint64)`, the row number equals `id`. A row carr
 | `v_timestamp64` | `Timestamp64` |
 | `v_interval` | `Interval` |
 | `v_interval64` | `Interval64` |
-| `v_yson` | `Yson` |
 | `seqno` | `Uint64`, operation number |
 
 `Decimal(5, 2)` is a narrow variant between `Decimal(1, 0)` and the standard `Decimal(22, 9)`. `Decimal(35, 9)` has precision 35 and scale 9. `Decimal(35, 35)` has precision 35 and scale 35.
 
-A `Decimal` value is random, uses every `scale` fractional digit, and stays within `precision`. Values of the other numeric and time columns are random inside the legal range. `v_yson` is valid YSON; its text size is chosen like the medium class below, from 100 to 500 bytes inclusive.
+A `Decimal` value is random, uses every `scale` fractional digit, and stays within `precision`. Values of the other numeric and time columns are random inside the legal range.
 
 ### Value size tables {#payload-tables}
 
-Three tables carry text (`Utf8`), bytes (`String`), `Json`, and `JsonDocument` columns. The primary key is `(id Uint64)`, and the row number equals `id`.
+Three tables carry text (`Utf8`), bytes (`String`), `Json`, `JsonDocument`, and `Yson` columns. The primary key is `(id Uint64)`, and the row number equals `id`.
 
 | Table | Class | Value size |
 | --- | --- | --- |
@@ -146,13 +145,13 @@ Three tables carry text (`Utf8`), bytes (`String`), `Json`, and `JsonDocument` c
 | `payload_medium` | medium | 100 to 500 bytes inclusive, length is random |
 | `payload_wide` | wide | 1000 to 5000 bytes inclusive, length is random |
 
-Columns in all three tables: `utf8 Utf8`, `bin String`, `json Json`, `json_doc JsonDocument`, `seqno Uint64`.
+Columns in all three tables: `utf8 Utf8`, `bin String`, `json Json`, `json_doc JsonDocument`, `yson Yson`, `seqno Uint64`.
 
 Size is measured as follows:
 
 * `Utf8` is the number of text bytes. The generator writes printable ASCII, so the byte count equals the character count.
 * `String` is the number of bytes. The contents are random and may be any byte sequence.
-* `Json` and `JsonDocument` are the number of bytes of the JSON text the client passes as a parameter. The document is valid. For the narrow class the lower bound is 2 bytes (`{}`), because a shorter JSON document does not exist. `JsonDocument` receives the same text. The server stores it in binary form, and the on-disk size may differ from the text size.
+* `Json`, `JsonDocument`, and `Yson` are the number of bytes of the text the client passes as a parameter. The document is valid. For the narrow class the lower bound is the shortest valid value: 2 bytes (`{}`) for `Json` and `JsonDocument`, 1 byte (`#`) for `Yson`. `JsonDocument` receives the same text as `Json` of the same class. The server stores `JsonDocument` in binary form, and the on-disk size may differ from the text size. `Yson` is filled using the same three size classes as `Json`.
 
 The narrow class for `String` and `Utf8` includes the empty value.
 
