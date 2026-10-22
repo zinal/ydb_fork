@@ -28,7 +28,7 @@ The `--path` directory contains only tables of this workload. Directory replicat
 
 ## Table schema {#schema}
 
-Every table is row-oriented, without secondary indexes and without explicit partitioning settings. Tables are created in the `--path` directory (default `replication`).
+Every table is row-oriented. Tables are created in the `--path` directory (default `replication`). Secondary indexes and partitioning settings are described below.
 
 Primary key columns are declared `NOT NULL`. The other columns allow `NULL`; every write puts a concrete value into them.
 
@@ -157,6 +157,31 @@ The narrow class for `String` and `Utf8` includes the empty value.
 
 The directory holds 27 tables: 23 primary-key tables, `types`, and three size tables.
 
+## Indexes and partitioning {#indexes}
+
+Every table gets a synchronous secondary index `seqno_idx` on `seqno`:
+
+```yql
+INDEX seqno_idx GLOBAL SYNC ON (seqno)
+```
+
+The column `seq` gets the same kind of index, `seq_idx`. The column `seq` exists only on the composite-key tables: `pk_bool`, `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, `pk_date`, and `pk_decimal_narrow`. The other tables have no index on `seq`.
+
+Automatic partitioning by size and by load is enabled for every table and for every one of these indexes. The minimum and maximum partition counts are `init` parameters and default to 1000 and 1100:
+
+```yql
+AUTO_PARTITIONING_BY_SIZE = ENABLED,
+AUTO_PARTITIONING_BY_LOAD = ENABLED,
+AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 1000,
+AUTO_PARTITIONING_MAX_PARTITIONS_COUNT = 1100
+```
+
+On a table these parameters are set in `WITH` at creation. When the first primary-key column has type `Uint32` or `Uint64`, `UNIFORM_PARTITIONS` is also set to the minimum, so the table is created with that many partitions. For any other type of the first column, uniform initial splitting is not available and the table is created with one partition; after that the partition count changes automatically and stays within the configured minimum and maximum.
+
+Index partitioning parameters are not set when the index is created. `init` creates the index and then runs `ALTER TABLE … ALTER INDEX … SET` with the same four parameters. `UNIFORM_PARTITIONS` is not set on an index.
+
+If the minimum is greater than the maximum, `init` fails with a parameter error and does not create the tables.
+
 ## Initial fill {#import}
 
 `import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. A load batch is idempotent: a retry writes the same keys with the same `UPSERT` and `seqno` 0.
@@ -268,6 +293,13 @@ Shared by `init`, `import`, `run`, and `clean`:
 | Parameter | Description | Default |
 | --- | --- | --- |
 | `--path` | Directory of workload tables in the source database | `replication` |
+
+`init`:
+
+| Parameter | Description | Default |
+| --- | --- | --- |
+| `--min-partitions` | Minimum partition count of a table and of each secondary index, `AUTO_PARTITIONING_MIN_PARTITIONS_COUNT` | `1000` |
+| `--max-partitions` | Maximum partition count of a table and of each secondary index, `AUTO_PARTITIONING_MAX_PARTITIONS_COUNT` | `1100` |
 
 `import`:
 
