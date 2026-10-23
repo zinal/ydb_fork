@@ -30,7 +30,7 @@ The `--path` directory contains only tables of this workload. Directory replicat
 
 Every table is row-oriented. Tables are created in the `--path` directory (default `replication`). Secondary indexes and partitioning settings are described below.
 
-Primary key columns are declared `NOT NULL`. The other columns allow `NULL`; every write puts a concrete value into them.
+Primary key columns are declared `NOT NULL`. The other columns allow `NULL`. On an inserted row, both in `import` and in a `run` transaction, one randomly chosen value field is `NULL` with probability 10%, and the other value fields are filled. In an `UPDATE`, one of the assigned values is `NULL` with probability 1%.
 
 A row-oriented table accepts comparable types that the storage can keep in a column. The workload uses the types from the tables below as keys. `Interval` and `Interval64` are among them: key comparison is defined for both, and a table with `Interval` in its primary key can be created. The types `TzDate`, `TzDatetime`, `TzTimestamp`, `TzDate32`, `TzDatetime64`, and `TzTimestamp64` are not stored in columns of row-oriented tables, so the schema has them neither as keys nor as values. `Float`, `Double`, `Json`, `JsonDocument`, and `Yson` are not used in the primary key; they appear among the value columns. `Uuid` in a primary key requires the server capability of the same name; the default configuration enables it. The storage also accepts `DyNumber` and comparable PostgreSQL types in a key; the schema has no columns of those types.
 
@@ -42,9 +42,9 @@ Every row of a table has a number `n`, an integer starting at 0. After `import` 
 
 ### seqno column {#seqno}
 
-Every table has a column `seqno Uint64 NOT NULL`. It is not part of the primary key. The `seq` column of a narrow key is the row number `n`. The `seqno` column is the operation number, one value across all tables.
+Every table has a column `seqno Uint64`. It is not part of the primary key and allows `NULL`. The `seq` column of a narrow key is the row number `n`. The `seqno` column is the operation number, one value across all tables.
 
-Every row of every table that one transaction inserts or updates is written with the same `seqno`.
+Every row of every table that one transaction inserts or updates receives the same `seqno`. When the random `NULL` choice lands on this column, the cell stays `NULL`.
 
 The number comes from an atomic transaction counter in the command process. The counter advances when the transaction is formed. A retry of that transaction keeps the same value.
 
@@ -336,7 +336,7 @@ The number of affected tables **M** is chosen uniformly from 1 to the number of 
 
 The transaction writes **R** rows into every selected table. R is chosen uniformly from 1 to **K** inclusive. K is the `--max-records` parameter. Of these R rows, `floor(R / 2)` are planned as inserts and the rest as updates. R = 1 yields one update. R = 2 yields one insert and one update. When fewer rows exist than updates were planned, the missing updates are performed as inserts. In an empty table all R rows are inserts.
 
-An insert fills every column and is performed with `UPSERT`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `seqno_hash`, `pk`, and `seq`. The `seqno_hash` value is the hash written when the row was inserted.
+An insert fills every column and is performed with `UPSERT`. With probability 10%, one random value field of that row is `NULL`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. With probability 1%, one of these assigned values is `NULL`. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `seqno_hash`, `pk`, and `seq`. The `seqno_hash` value is the hash written when the row was inserted.
 
 The transaction is idempotent and runs in the client retry handler with the idempotent flag set. Primary keys, the columns chosen for update, their new values, and `seqno` are fixed before the first attempt. Every attempt sends the same statements with the same parameters. A repeated `UPSERT` after a commit whose response the client did not see writes the same rows and does not fail with a primary key conflict. A repeated `UPDATE` writes the same columns for the same full primary key. The handler retries statuses that are safe to retry for an idempotent operation, including when the outcome of an attempt is unknown. A retry allocates neither new row numbers, nor a new `seqno`, nor a different set of columns.
 
