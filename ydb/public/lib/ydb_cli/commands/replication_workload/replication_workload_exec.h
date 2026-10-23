@@ -23,7 +23,9 @@ TStatus ExecData(
     const TDuration& timeout,
     bool idempotent);
 // Runs every write as its own query inside one interactive serializable transaction.
-// A retry repeats the same statements from the beginning.
+// The whole transaction goes through RetryQuerySync with the idempotent flag:
+// the first query opens it, the following queries continue it, then it is committed.
+// A retriable status repeats that sequence from the beginning.
 TStatus ExecWrites(
     NQuery::TQueryClient& client,
     const TVector<TRowWrite>& writes,

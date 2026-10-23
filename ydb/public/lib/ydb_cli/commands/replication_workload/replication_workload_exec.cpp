@@ -5,6 +5,7 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/value/value.h>
 
 #include <algorithm>
+#include <optional>
 
 namespace NYdb::NConsoleClient::NReplicationWorkload {
 
@@ -256,30 +257,33 @@ TStatus ExecWrites(
         return TStatus(EStatus::SUCCESS, NIssue::TIssues());
     }
     const NQuery::TExecuteQuerySettings settings = MakeQuerySettings(timeout);
-    const NQuery::TBeginTxSettings beginSettings = NQuery::TBeginTxSettings().ClientTimeout(timeout);
-    const NQuery::TRollbackTxSettings rollbackSettings = NQuery::TRollbackTxSettings().ClientTimeout(timeout);
-    return client.RetryQuerySync([&writes, settings, beginSettings, rollbackSettings](NQuery::TSession session) {
-        auto begin = session.BeginTransaction(NQuery::TTxSettings::SerializableRW(), beginSettings).GetValueSync();
-        if (!begin.IsSuccess()) {
-            return TStatus(std::move(begin));
-        }
-        NQuery::TTransaction tx = begin.GetTransaction();
-        for (size_t i = 0; i < writes.size(); ++i) {
-            auto control = NQuery::TTxControl::Tx(tx);
-            if (i + 1 == writes.size()) {
-                control.CommitTx(true);
-            }
+    const NQuery::TCommitTxSettings commitSettings = NQuery::TCommitTxSettings().ClientTimeout(timeout);
+    // Same shape as an interactive TPC-C transaction: RetryQuerySync owns the retries,
+    // the callback runs one attempt and returns its status.
+    return client.RetryQuerySync([&writes, settings, commitSettings](NQuery::TSession session) {
+        std::optional<NQuery::TTransaction> tx;
+        for (const TRowWrite& write : writes) {
+            const auto control = tx
+                ? NQuery::TTxControl::Tx(*tx)
+                : NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW());
             auto result = session.ExecuteQuery(
-                std::string(writes[i].Statement),
+                std::string(write.Statement),
                 control,
-                BindParams(writes[i].Params),
+                BindParams(write.Params),
                 settings).GetValueSync();
             if (!result.IsSuccess()) {
-                tx.Rollback(rollbackSettings).GetValueSync();
                 return TStatus(std::move(result));
             }
+            if (!tx) {
+                auto started = result.GetTransaction();
+                if (!started) {
+                    return TStatus(EStatus::CLIENT_INTERNAL_ERROR, NIssue::TIssues());
+                }
+                tx = std::move(*started);
+            }
         }
-        return TStatus(EStatus::SUCCESS, NIssue::TIssues());
+        auto commit = tx->Commit(commitSettings).GetValueSync();
+        return TStatus(std::move(commit));
     }, RetrySettings(timeout, true));
 }
 
