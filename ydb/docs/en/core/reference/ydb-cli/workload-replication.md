@@ -290,7 +290,7 @@ An update addresses a row that already exists. For that, every table has a bound
 
 ### Reading the boundary at the start of `run` {#boundary-read}
 
-Before the first transaction the command reads the boundary of every table from the database once. The read is an online read-only query and does not take a serializable lock. Its deadline is at least 10 minutes and at least `--client-timeout`. Queries to different tables run in parallel.
+Before the first transaction the command reads the boundary of every table from the database once. The read is an online read-only query and does not take a serializable lock. Its deadline is at least 10 minutes and at least `--timeout`. Queries to different tables run in parallel.
 
 For a composite key the number is stored in `seq`. These tables are `pk_bool`, `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, `pk_date`, and `pk_decimal_narrow`. The boundary is read as follows:
 
@@ -338,7 +338,11 @@ The transaction writes **R** rows into every selected table. R is chosen uniform
 
 An insert fills every column and is performed with `UPSERT`. With probability 10%, one random value field of that row, other than `seqno`, is `NULL`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. With probability 1%, one of these assigned values, other than `seqno`, is `NULL`. When the set contains only `seqno`, no empty value is written. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `seqno_hash`, `pk`, and `seq`. The `seqno_hash` value is the hash written when the row was inserted.
 
-The transaction is idempotent and runs in the client retry handler with the idempotent flag set. Primary keys, the columns chosen for update, their new values, and `seqno` are fixed before the first attempt. Every attempt sends the same statements with the same parameters. A repeated `UPSERT` after a commit whose response the client did not see writes the same rows and does not fail with a primary key conflict. A repeated `UPDATE` writes the same columns for the same full primary key. The handler retries statuses that are safe to retry for an idempotent operation, including when the outcome of an attempt is unknown. A retry allocates neither new row numbers, nor a new `seqno`, nor a different set of columns.
+Each statement is sent as its own query inside one interactive serializable transaction. The transaction is opened, the statements run one after another, and the last query commits it. When a statement fails, the client rolls the transaction back and the retry handler starts it again.
+
+A query text is the parameter declarations plus one statement. A parameter name is the column name. Every insert into one table therefore has the same text, listing every column. An update text is determined by the table and by the set of columns in `SET`. Columns of that set are listed by name, so one set produces one text. An empty value leaves the text unchanged: every value column other than `seqno` is declared with an optional type. A repeated text lets the server take an already built plan from the cache.
+
+The transaction is idempotent and runs in the client retry handler with the idempotent flag set. Primary keys, the columns chosen for update, their new values, and `seqno` are fixed before the first attempt. Every attempt opens the transaction again and sends the same statements as separate queries, with the same parameters. A repeated `UPSERT` after a commit whose response the client did not see writes the same rows and does not fail with a primary key conflict. A repeated `UPDATE` writes the same columns for the same full primary key. The handler retries statuses that are safe to retry for an idempotent operation, including when the outcome of an attempt is unknown. A retry allocates neither new row numbers, nor a new `seqno`, nor a different set of columns.
 
 A transaction counts as successful after this handler. Retriable failures are not included in the error rate when the final attempt succeeds. The error rate includes a transaction whose last attempt failed. One such transaction is one error, however many tables it contains. Its row numbers do not join the boundary, and its `seqno` is not reused. The number reservation is released, and the next insert into the same table again takes numbers starting at `boundary + 1`.
 
@@ -350,7 +354,7 @@ The upper bound on simultaneous transactions equals the number of users. The cli
 
 `--threads` sets the number of client pool threads that run asynchronous completions. The default is 0: the pool is adaptive and the client chooses its size. A positive value fixes the pool size. Driver network threads stay at the client default.
 
-`--seconds` limits the run. When the time is over, new transactions are not started. Transactions already sent wait for their timeout. A user who is waiting out `--pause` does not start another transaction. When a sent transaction finishes, by commit or by error, its number reservation is released. The command exits once no such transaction is still outstanding.
+`--seconds` limits the run. When the time is over, new transactions are not started. Transactions already started wait until their requests finish, and each request is bounded by `--timeout`. A user who is waiting out `--pause` does not start another transaction. When a started transaction finishes, by commit or by error, its number reservation is released. The command exits once no such transaction is still outstanding.
 
 `--seed` fixes the random generator: table selection, the row count R, selection of numbers for update, and the lengths and contents of values. With several users the seed fixes each user's decisions, but not the order in which their transactions interleave. If the parameter is omitted, the seed is taken from the current time. Numbers of new rows do not depend on the seed: the table boundary issues them.
 
@@ -410,11 +414,9 @@ Shared by `init`, `import`, `run`, and `clean`:
 | `--threads` | Client pool threads. 0 means an adaptive pool | `0` |
 | `--window` | Rate output window, seconds | `1` |
 | `--seed` | Generator seed. Without the parameter the seed is taken from the current time | — |
-| `--client-timeout` | Transport timeout. A plain number with no suffix is milliseconds | `10s` |
-| `--operation-timeout` | Operation timeout | `5s` |
-| `--cancel-after` | Operation cancel timeout | `5s` |
+| `--timeout` | Timeout of each request: opening the transaction, a statement, and a rollback. A plain number with no suffix is milliseconds | `10s` |
 
-A request to the query service has one client timeout. For write transactions, `run` passes it the smallest of `--client-timeout`, `--operation-timeout`, and `--cancel-after`. The values are sized for a transaction that writes several tables, including rows of several kilobytes. The initial boundary read uses a separate, longer deadline: see [reading the boundary](#boundary-read).
+A request to the query service has one client timeout, and `run` sets it with `--timeout`. The limit applies to a single request, including a statement that writes a row of several kilobytes. A transaction of several statements may take several such limits. The initial boundary read uses a separate, longer deadline: see [reading the boundary](#boundary-read).
 
 ## Example {#example}
 
