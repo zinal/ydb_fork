@@ -10,10 +10,12 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/value/value.h>
 
 #include <util/generic/hash_set.h>
+#include <util/generic/yexception.h>
 #include <util/string/printf.h>
 #include <util/string/cast.h>
 #include <util/system/thread.h>
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
@@ -40,6 +42,23 @@ void PrintStats(double elapsedSec, double windowSec, ui64 tx, ui64 errors) {
         << Endl;
 }
 
+NQuery::TTxControl ReadOnlyTx() {
+    return NQuery::TTxControl::BeginTx(NQuery::TTxSettings::OnlineRO()).CommitTx(true);
+}
+
+TDuration ScanTimeout(const TDuration& clientTimeout) {
+    const TDuration floor = TDuration::Minutes(10);
+    return clientTimeout > floor ? clientTimeout : floor;
+}
+
+void EnsureQuery(const TStatus& status, const TString& query) {
+    if (!status.IsSuccess()) {
+        ythrow yexception() << query
+            << " status=" << status.GetStatus()
+            << " issues=" << status.GetIssues().ToString();
+    }
+}
+
 i64 LoadBoundary(
     NQuery::TQueryClient& client,
     const TTable& table,
@@ -54,9 +73,9 @@ i64 LoadBoundary(
     }
     auto result = client.ExecuteQuery(
         query,
-        NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW()).CommitTx(true),
+        ReadOnlyTx(),
         MakeQuerySettings(timeout, timeout, timeout)).GetValueSync();
-    NStatusHelpers::ThrowOnError(result);
+    EnsureQuery(result, query);
     TResultSetParser parser(result.GetResultSet(0));
     if (!parser.TryNextRow()) {
         return -1;
@@ -77,9 +96,9 @@ void LoadSeqnoHashes(
     const TString query = "SELECT seq, seqno_hash FROM " + QuotePath(fullName) + ";";
     auto result = client.ExecuteQuery(
         query,
-        NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW()).CommitTx(true),
+        ReadOnlyTx(),
         MakeQuerySettings(timeout, timeout, timeout)).GetValueSync();
-    NStatusHelpers::ThrowOnError(result);
+    EnsureQuery(result, query);
     TResultSetParser parser(result.GetResultSet(0));
     while (parser.TryNextRow()) {
         const ui64 seq = parser.ColumnParser("seq").GetUint64();
@@ -142,13 +161,49 @@ public:
         }
     }
 
-    void Load(const TDuration& timeout) {
-        for (size_t i = 0; i < Tables.size(); ++i) {
-            const TString fullName = JoinPath(Root, Tables[i].Name);
-            State[i].Boundary = LoadBoundary(Client, Tables[i], fullName, timeout);
-            if (Tables[i].SeqnoHashPrefix) {
-                LoadSeqnoHashes(Client, fullName, timeout, State[i].SeqnoHashByRow);
+    void Load(const TDuration& clientTimeout) {
+        const TDuration timeout = ScanTimeout(clientTimeout);
+        std::atomic<size_t> next{0};
+        std::mutex errorMutex;
+        TString errorText;
+        std::atomic<bool> failed{false};
+        auto fail = [&](const TString& text) {
+            std::lock_guard<std::mutex> lock(errorMutex);
+            if (errorText.empty()) {
+                errorText = text;
             }
+            failed.store(true);
+        };
+        auto worker = [&]() {
+            while (!failed.load()) {
+                const size_t index = next.fetch_add(1);
+                if (index >= Tables.size()) {
+                    return;
+                }
+                const TString fullName = JoinPath(Root, Tables[index].Name);
+                try {
+                    State[index].Boundary = LoadBoundary(Client, Tables[index], fullName, timeout);
+                    if (Tables[index].SeqnoHashPrefix) {
+                        LoadSeqnoHashes(Client, fullName, timeout, State[index].SeqnoHashByRow);
+                    }
+                } catch (const std::exception& ex) {
+                    fail(ex.what());
+                } catch (...) {
+                    fail(TStringBuilder() << "boundary read failed for " << fullName);
+                }
+            }
+        };
+        const ui64 workerCount = std::min<ui64>(8, std::min<ui64>(Users + 4, Tables.size()));
+        TVector<std::thread> pool;
+        pool.reserve(workerCount);
+        for (ui64 i = 0; i < workerCount; ++i) {
+            pool.emplace_back(worker);
+        }
+        for (std::thread& thread : pool) {
+            thread.join();
+        }
+        if (failed.load()) {
+            ythrow yexception() << errorText;
         }
     }
 
