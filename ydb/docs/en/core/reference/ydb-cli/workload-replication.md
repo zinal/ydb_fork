@@ -229,9 +229,9 @@ The text types here are `Utf8`, `String`, `Json`, `JsonDocument`, and `Yson`.
 
 Size is measured as follows:
 
-* `Utf8` is the number of text bytes. The generator writes printable ASCII, so the byte count equals the character count.
+* `Utf8` is the number of text bytes. The generator takes a slice of TPC-H pseudo-text: words and punctuation from the `dists.dss` dictionary. The slice is printable ASCII, so the byte count equals the character count.
 * `String` is the number of bytes. The contents are random and may be any byte sequence.
-* `Json`, `JsonDocument`, and `Yson` are the number of bytes of the text the client passes as a parameter. The document is valid. For the narrow class the lower bound is the shortest valid value: 2 bytes (`{}`) for `Json` and `JsonDocument`, 1 byte (`#`) for `Yson`. `JsonDocument` in `c_medium` and `c_wide` receives text of the same size as `Json` of that class. The server stores `JsonDocument` in binary form, and the on-disk size may differ from the text size.
+* `Json`, `JsonDocument`, and `Yson` are the number of bytes of the text the client passes as a parameter. The document is valid. For the narrow class the lower bound is the shortest valid value: 2 bytes (`{}`) for `Json` and `JsonDocument`, 1 byte (`#`) for `Yson`. From `{"v":"…"}` for `Json` and `{v="…"}` for `Yson`, the field value is the same TPC-H pseudo-text slice. `JsonDocument` in `c_medium` and `c_wide` receives text of the same size as `Json` of that class. The server stores `JsonDocument` in binary form, and the on-disk size may differ from the text size.
 
 The narrow class for `String` and `Utf8` includes the empty value.
 
