@@ -423,16 +423,7 @@ error status=<код статуса> issues=<текст сообщений>
 {{ ydb-cli }} workload replication import --path replication --rows 1000
 ```
 
-Дальше на базе-приёмнике пользователь создаёт репликацию каталога. Параметры соединения и аутентификации описаны в [CREATE ASYNC REPLICATION](../../yql/reference/syntax/create-async-replication.md). Команда нагрузки этот запрос не выполняет:
-
-```yql
-CREATE ASYNC REPLICATION replication_workload
-FOR `replication` AS `replication_replica`
-WITH (
-    CONNECTION_STRING = 'grpcs://<источник>:2135/?database=<база-источник>',
-    TOKEN_SECRET_PATH = '<секрет>'
-);
-```
+Дальше на базе-приёмнике пользователь создаёт экземпляр репликации. Полный запрос — в разделе [ниже](#create-replication). Команда нагрузки этот запрос не выполняет.
 
 После создания экземпляра запускается запись, при необходимости с текстом ошибок:
 
@@ -450,6 +441,64 @@ WITH (
 ```bash
 {{ ydb-cli }} workload replication clean --path replication
 ```
+
+## Пример создания асинхронной репликации {#create-replication}
+
+Запросы ниже выполняются в базе-приёмнике после `import` и до `run`. Команда нагрузки их не выполняет.
+
+Сначала в базе-приёмнике создаётся [секрет](../../yql/reference/syntax/create-secret.md) с паролем пользователя базы-источника:
+
+```yql
+CREATE SECRET source_password WITH (value = "<пароль>");
+```
+
+Затем создаётся экземпляр репликации на все 28 таблиц каталога `replication`. Путь на приёмнике совпадает с путём на источнике. Аутентификация — логин `USER` и секрет `PASSWORD_SECRET_PATH`. Соединение идёт по `grpcs://`, корневой сертификат источника передаётся в `CA_CERT` сырой строкой `@@…@@`. `CONSISTENCY_LEVEL = 'ROW'` задаёт [согласованность уровня строки](../../concepts/async-replication.md#consistency-level-row); это значение по умолчанию.
+
+```yql
+CREATE ASYNC REPLICATION source_repl
+FOR
+    `replication/pk_bool` AS `replication/pk_bool`,
+    `replication/pk_int8` AS `replication/pk_int8`,
+    `replication/pk_uint8` AS `replication/pk_uint8`,
+    `replication/pk_int16` AS `replication/pk_int16`,
+    `replication/pk_uint16` AS `replication/pk_uint16`,
+    `replication/pk_date` AS `replication/pk_date`,
+    `replication/pk_decimal_narrow` AS `replication/pk_decimal_narrow`,
+    `replication/pk_int32` AS `replication/pk_int32`,
+    `replication/pk_int64` AS `replication/pk_int64`,
+    `replication/pk_uint32` AS `replication/pk_uint32`,
+    `replication/pk_uint64` AS `replication/pk_uint64`,
+    `replication/pk_decimal` AS `replication/pk_decimal`,
+    `replication/pk_decimal_wide` AS `replication/pk_decimal_wide`,
+    `replication/pk_date32` AS `replication/pk_date32`,
+    `replication/pk_datetime` AS `replication/pk_datetime`,
+    `replication/pk_datetime64` AS `replication/pk_datetime64`,
+    `replication/pk_timestamp` AS `replication/pk_timestamp`,
+    `replication/pk_timestamp64` AS `replication/pk_timestamp64`,
+    `replication/pk_interval` AS `replication/pk_interval`,
+    `replication/pk_interval64` AS `replication/pk_interval64`,
+    `replication/pk_uuid` AS `replication/pk_uuid`,
+    `replication/pk_string` AS `replication/pk_string`,
+    `replication/pk_utf8` AS `replication/pk_utf8`,
+    `replication/wide_utf8` AS `replication/wide_utf8`,
+    `replication/wide_string` AS `replication/wide_string`,
+    `replication/wide_json` AS `replication/wide_json`,
+    `replication/wide_json_doc` AS `replication/wide_json_doc`,
+    `replication/wide_yson` AS `replication/wide_yson`
+WITH (
+    USER = 'test1',
+    PASSWORD_SECRET_PATH = 'source_password',
+    CONSISTENCY_LEVEL = 'ROW',
+    CONNECTION_STRING = 'grpcs://<источник>:2135/?database=<база-источник>',
+    CA_CERT = @@
+-----BEGIN CERTIFICATE-----
+<содержимое сертификата>
+-----END CERTIFICATE-----
+@@
+);
+```
+
+Остальные параметры соединения и аутентификации описаны в [CREATE ASYNC REPLICATION](../../yql/reference/syntax/create-async-replication.md).
 
 ## Что остаётся пользователю {#scope}
 

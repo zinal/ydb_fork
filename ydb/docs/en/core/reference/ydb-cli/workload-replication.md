@@ -423,16 +423,7 @@ A request to the query service has one client timeout. `run` passes it the small
 {{ ydb-cli }} workload replication import --path replication --rows 1000
 ```
 
-Next, on the destination database, the user creates replication of the directory. Connection and authentication parameters are described in [CREATE ASYNC REPLICATION](../../yql/reference/syntax/create-async-replication.md). The workload command does not execute this statement:
-
-```yql
-CREATE ASYNC REPLICATION replication_workload
-FOR `replication` AS `replication_replica`
-WITH (
-    CONNECTION_STRING = 'grpcs://<source>:2135/?database=<source-database>',
-    TOKEN_SECRET_PATH = '<secret>'
-);
-```
+Next, on the destination database, the user creates the replication instance. The full statement is in the [section below](#create-replication). The workload command does not execute it.
 
 After the instance is created, the write phase starts, with error text when needed:
 
@@ -450,6 +441,64 @@ Dropping the tables:
 ```bash
 {{ ydb-cli }} workload replication clean --path replication
 ```
+
+## Creating an asynchronous replication instance {#create-replication}
+
+The statements below run in the destination database after `import` and before `run`. The workload command does not execute them.
+
+First, a [secret](../../yql/reference/syntax/create-secret.md) is created in the destination database with the source database user's password:
+
+```yql
+CREATE SECRET source_password WITH (value = "<password>");
+```
+
+Then a replication instance is created for all 28 tables in the `replication` directory. The path on the destination is the same as the path on the source. Authentication is the `USER` login and the `PASSWORD_SECRET_PATH` secret. The connection uses `grpcs://`, and the source root certificate is passed in `CA_CERT` as a raw `@@…@@` string. `CONSISTENCY_LEVEL = 'ROW'` selects [row-level consistency](../../concepts/async-replication.md#consistency-level-row); that is the default.
+
+```yql
+CREATE ASYNC REPLICATION source_repl
+FOR
+    `replication/pk_bool` AS `replication/pk_bool`,
+    `replication/pk_int8` AS `replication/pk_int8`,
+    `replication/pk_uint8` AS `replication/pk_uint8`,
+    `replication/pk_int16` AS `replication/pk_int16`,
+    `replication/pk_uint16` AS `replication/pk_uint16`,
+    `replication/pk_date` AS `replication/pk_date`,
+    `replication/pk_decimal_narrow` AS `replication/pk_decimal_narrow`,
+    `replication/pk_int32` AS `replication/pk_int32`,
+    `replication/pk_int64` AS `replication/pk_int64`,
+    `replication/pk_uint32` AS `replication/pk_uint32`,
+    `replication/pk_uint64` AS `replication/pk_uint64`,
+    `replication/pk_decimal` AS `replication/pk_decimal`,
+    `replication/pk_decimal_wide` AS `replication/pk_decimal_wide`,
+    `replication/pk_date32` AS `replication/pk_date32`,
+    `replication/pk_datetime` AS `replication/pk_datetime`,
+    `replication/pk_datetime64` AS `replication/pk_datetime64`,
+    `replication/pk_timestamp` AS `replication/pk_timestamp`,
+    `replication/pk_timestamp64` AS `replication/pk_timestamp64`,
+    `replication/pk_interval` AS `replication/pk_interval`,
+    `replication/pk_interval64` AS `replication/pk_interval64`,
+    `replication/pk_uuid` AS `replication/pk_uuid`,
+    `replication/pk_string` AS `replication/pk_string`,
+    `replication/pk_utf8` AS `replication/pk_utf8`,
+    `replication/wide_utf8` AS `replication/wide_utf8`,
+    `replication/wide_string` AS `replication/wide_string`,
+    `replication/wide_json` AS `replication/wide_json`,
+    `replication/wide_json_doc` AS `replication/wide_json_doc`,
+    `replication/wide_yson` AS `replication/wide_yson`
+WITH (
+    USER = 'test1',
+    PASSWORD_SECRET_PATH = 'source_password',
+    CONSISTENCY_LEVEL = 'ROW',
+    CONNECTION_STRING = 'grpcs://<source>:2135/?database=<source-database>',
+    CA_CERT = @@
+-----BEGIN CERTIFICATE-----
+<certificate body>
+-----END CERTIFICATE-----
+@@
+);
+```
+
+The other connection and authentication parameters are described in [CREATE ASYNC REPLICATION](../../yql/reference/syntax/create-async-replication.md).
 
 ## Left to the user {#scope}
 
