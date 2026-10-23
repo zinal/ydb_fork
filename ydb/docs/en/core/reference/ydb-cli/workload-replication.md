@@ -22,7 +22,7 @@ The user creates the asynchronous replication instance after the initial fill an
 
 {% note info %}
 
-The `--path` directory contains only tables of this workload. Directory replication captures every row-oriented table present in it at the moment the instance is created.
+The `--path` directory should contain only tables of this workload. Directory replication takes every row-oriented table present in it at the moment the instance is created.
 
 {% endnote %}
 
@@ -30,7 +30,7 @@ The `--path` directory contains only tables of this workload. Directory replicat
 
 Every table is row-oriented. Tables are created in the `--path` directory (default `replication`). Secondary indexes and partitioning settings are described below.
 
-Primary key columns are declared `NOT NULL`. The other columns allow `NULL`. On an inserted row, both in `import` and in a `run` transaction, one randomly chosen value field is `NULL` with probability 10%, and the other value fields are filled. In an `UPDATE`, one of the assigned values is `NULL` with probability 1%.
+Primary key columns are declared `NOT NULL`. The other columns allow `NULL`. On insert, in both `import` and `run`, one randomly chosen value field is written as `NULL` with probability 10%, and the other value fields are filled. In an `UPDATE`, one of the assigned values is written as `NULL` with probability 1%.
 
 A row-oriented table accepts comparable types that the storage can keep in a column. The workload uses the types from the tables below as keys. `Interval` and `Interval64` are among them: key comparison is defined for both, and a table with `Interval` in its primary key can be created. The types `TzDate`, `TzDatetime`, `TzTimestamp`, `TzDate32`, `TzDatetime64`, and `TzTimestamp64` are not stored in columns of row-oriented tables, so the schema has them neither as keys nor as values. `Float`, `Double`, `Json`, `JsonDocument`, and `Yson` are not used in the primary key; they appear among the value columns. `Uuid` in a primary key requires the server capability of the same name; the default configuration enables it. The storage also accepts `DyNumber` and comparable PostgreSQL types in a key; the schema has no columns of those types.
 
@@ -42,13 +42,13 @@ Every row of a table has a number `n`, an integer starting at 0. After `import` 
 
 ### seqno column {#seqno}
 
-Every table has a column `seqno Uint64`. It is not part of the primary key and allows `NULL`. The `seq` column of a narrow key is the row number `n`. The `seqno` column is the operation number, one value across all tables.
+Every table has a column `seqno Uint64`. It is not part of the primary key and may be `NULL`. The `seq` column of a composite key stores the row number `n`. `seqno` is the operation number, shared by every table of one transaction.
 
-Every row of every table that one transaction inserts or updates receives the same `seqno`. When the random `NULL` choice lands on this column, the cell stays `NULL`.
+Rows that one transaction inserts or updates receive this number. When `seqno` is the field chosen empty in a particular row, the cell stays `NULL`, and the transaction's operation number does not change. `seqno_hash` is also computed from the operation number, not from the cell contents.
 
-The number comes from an atomic transaction counter in the command process. The counter advances when the transaction is formed. A retry of that transaction keeps the same value.
+The number comes from an atomic counter in the command process. The counter advances when the transaction is formed. A retry of that transaction keeps the same number.
 
-On the initial `import` load every written row has `seqno` equal to 0. The load does not advance the counter.
+On `import` the operation number is 0. The load does not advance the counter.
 
 When `run` starts, the counter is set to the current Unix time in microseconds: the integer number of UTC microseconds since 1970-01-01. The first transaction of that run receives this value, and each following new transaction receives the next integer. A later `run` again sets the counter to the Unix time of its own start, also in microseconds.
 
@@ -141,7 +141,7 @@ The table-to-key mapping:
 
 The binary and text keys are a cryptographic hash of the number, not its textual representation. The order of these keys in the table does not follow the order of the numbers.
 
-Bit reversal reorders the bits of the number: bit `i` of the result equals bit `width − 1 − i` of the number. For `Int32` and `Uint32` the width is 32, and the number has to be less than 2^32; the `Int32` bit string is read as a signed value. For `Int64`, `Uint64`, the wide-table `id`, and `Decimal(35, 0)` the width is 64. For `Decimal(35, 0)` the bit string is read as a non-negative integer.
+Bit reversal reorders the bits of the number: bit `i` of the result equals bit `w − 1 − i` of the original number. For `Int32` and `Uint32`, `w = 32`, and the number has to be less than 2^32. The `Int32` bit string is read as a signed value. For `Int64`, `Uint64`, the wide-table `id`, and `Decimal(35, 0)`, `w = 64`. For `Decimal(35, 0)` the same string is read as a non-negative integer.
 
 Mixing over an inclusive integer range `[lo, hi]` is defined as follows:
 
@@ -151,7 +151,7 @@ A is the smallest odd positive integer coprime to span
 value = lo + ((n * A) mod span)
 ```
 
-The number has to be less than `span`. For the ranges below, `A` is already computed:
+The number has to be less than `span`. The multipliers for these ranges:
 
 | Type | `lo` | `hi` | `A` |
 | --- | --- | --- | --- |
@@ -264,7 +264,7 @@ If the minimum is greater than the maximum, `init` fails with a parameter error 
 
 ## Initial fill {#import}
 
-`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. On `pk_bool` and `pk_decimal_narrow` the `seqno_hash` column of the load equals the hash of zero.
+`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. The operation number of these rows is 0. With probability 10%, one value field, including `seqno`, stays `NULL`. On `pk_bool` and `pk_decimal_narrow` the `seqno_hash` column equals the hash of zero, including when the `seqno` cell is empty.
 
 Rows are written in batches. One batch holds at most `--batch-size` rows, 100 by default. The last batch of a table is shorter when Q is not divisible by that size. A batch is one query:
 
@@ -274,11 +274,11 @@ UPSERT INTO `<table>`
 SELECT * FROM AS_TABLE($input);
 ```
 
-Struct fields have the same names as the table columns and follow the same order. A batch is idempotent: a retry writes the same rows with the same `UPSERT` and `seqno` 0.
+Struct fields have the same names as the table columns and follow the same order. Primary-key fields are required; value fields are optional (`type?`). A batch is idempotent: a retry sends the same rows with the same values, including the same empty field.
 
-Batches of one table are sent one after another. Different tables are processed at the same time. `--threads` sets the thread count; by default it is the number of vCPUs on the current host. The number of tables in progress at once is the smaller of that thread count and the number of tables in the directory.
+Batches of one table are sent one after another. Different tables are processed at the same time. `--threads` sets the thread count; by default it is the number of vCPUs on the current host. The number of tables in progress at once is the smaller of the thread count and the number of tables in the directory.
 
-The command finishes after all of these rows are committed. The batch size does not affect the `run` scenario.
+The command finishes after every batch is committed. The batch size belongs to `import` only and does not change the size of `run` transactions.
 
 A repeated `import` when rows are already present fails the command and does not rewrite the table. The working order is one `import` after `init`.
 
@@ -322,9 +322,9 @@ This read is valid while the table contains only rows of this workload and their
 
 The boundary is kept in the process memory and moves forward when a transaction with new numbers commits successfully.
 
-At most one transaction at a time reserves and commits new numbers of a given table. A transaction that needs inserts into several tables locks those tables in name order and holds the locks until the commit finishes, so users do not deadlock. A retried transaction uses the numbers it already reserved. A number joins the boundary only after a successful commit. Until the transaction commits, updates do not select these numbers.
+At most one transaction at a time reserves new numbers of a given table. The reservation is client memory: a queue that hands out the next numbers, not a lock on a row or a partition in the server. A transaction that needs inserts into several tables takes the reservations in table-name order and holds them until the transaction finishes. The name order keeps two users from waiting on each other in a circle. A retry uses the numbers it already reserved. A number joins the boundary only after a successful commit. Until then, those numbers are not chosen for update.
 
-Committed numbers of a table therefore always form a contiguous run from 0 through the current boundary. The next `run` reads the same boundary with the same query: `ORDER BY seq DESC LIMIT 1` for a composite key and `COUNT(*)` for the other tables. If the process stops before the commit, the server rolls the unfinished transaction back, and the prefix has no hole.
+Committed numbers of a table therefore always run contiguously from 0 through the current boundary. The next `run` reads the same boundary with the same query: `ORDER BY seq DESC LIMIT 1` for a composite key and `COUNT(*)` for the other tables. If the process stops before the commit, the server rolls the unfinished transaction back, and the number prefix stays contiguous.
 
 An update picks a number uniformly from `0 .. boundary` inclusive, using the boundary as it was at the start of the transaction. Numbers chosen for update inside one transaction are distinct when there are no more of them than `boundary + 1`. When more updates are planned than rows already exist, the extra updates become inserts and receive the next numbers.
 
@@ -340,17 +340,17 @@ An insert fills every column and is performed with `UPSERT`. With probability 10
 
 The transaction is idempotent and runs in the client retry handler with the idempotent flag set. Primary keys, the columns chosen for update, their new values, and `seqno` are fixed before the first attempt. Every attempt sends the same statements with the same parameters. A repeated `UPSERT` after a commit whose response the client did not see writes the same rows and does not fail with a primary key conflict. A repeated `UPDATE` writes the same columns for the same full primary key. The handler retries statuses that are safe to retry for an idempotent operation, including when the outcome of an attempt is unknown. A retry allocates neither new row numbers, nor a new `seqno`, nor a different set of columns.
 
-A transaction counts as successful after this handler. Retriable failures are not included in the error rate when the final attempt succeeds. The error rate includes a transaction whose last attempt failed. One such transaction is one error, regardless of how many tables it contains. Its row numbers do not join the boundary, and its `seqno` is not reused. After the failure the table locks are released, and the next insert into the same table again takes row numbers starting at `boundary + 1`.
+A transaction counts as successful after this handler. Retriable failures are not included in the error rate when the final attempt succeeds. The error rate includes a transaction whose last attempt failed. One such transaction is one error, however many tables it contains. Its row numbers do not join the boundary, and its `seqno` is not reused. The number reservation is released, and the next insert into the same table again takes numbers starting at `boundary + 1`.
 
 ## Concurrency {#concurrency}
 
-`--users` sets the number of parallel users. The default is 1. Each user loops through one transaction, waits for `--pause`, and starts the next one. The pause is the same after success and after an error. The pause wait is asynchronous.
+`--users` sets the number of parallel users. The default is 1. Each user runs one transaction, waits for `--pause`, and starts the next one. The pause is the same after success and after an error, and it does not stop the other users.
 
-The upper bound on simultaneous transactions equals the number of users. The client session pool is sized for that number. Transactions that insert rows into the same table pass through it one after another. Transactions with disjoint sets of tables run at the same time. Updates of already committed numbers do not block each other.
+The upper bound on simultaneous transactions equals the number of users. The client session pool is sized for that number. Transactions that insert rows into the same table pass through its number reservation one after another. Transactions with disjoint sets of tables run at the same time. Updates of already committed numbers do not take the reservation and do not wait in the insert queue.
 
 `--threads` sets the number of client pool threads that run asynchronous completions. The default is 0: the pool is adaptive and the client chooses its size. A positive value fixes the pool size. Driver network threads stay at the client default.
 
-`--seconds` limits the run. When the time is over, new transactions are not started, and transactions already sent wait for their timeout. The pause is interrupted together with the shutdown. Table locks are released before exit, including when a transaction never committed.
+`--seconds` limits the run. When the time is over, new transactions are not started. Transactions already sent wait for their timeout. A user who is waiting out `--pause` does not start another transaction. When a sent transaction finishes, by commit or by error, its number reservation is released. The command exits once no such transaction is still outstanding.
 
 `--seed` fixes the random generator: table selection, the row count R, selection of numbers for update, and the lengths and contents of values. With several users the seed fixes each user's decisions, but not the order in which their transactions interleave. If the parameter is omitted, the seed is taken from the current time. Numbers of new rows do not depend on the seed: the table boundary issues them.
 
@@ -374,7 +374,7 @@ error status=<status code> issues=<message text>
 
 The query text is not included. Without `--verbose`, only rates and counters are printed.
 
-A non-zero `run` exit code is reserved for startup failures: missing tables, invalid parameters, or a failure of the run itself. Errors of individual transactions do not change the exit code; they show up in `errors` and, with `--verbose`, in the error texts.
+`run` exits with a non-zero code when it cannot start or when the command itself fails: missing tables, invalid parameters, or a failure while reading the boundary. Errors of individual transactions do not change the exit code. They show up in `errors` and, with `--verbose`, in the error texts.
 
 ## Parameters {#options}
 
@@ -414,7 +414,7 @@ Shared by `init`, `import`, `run`, and `clean`:
 | `--operation-timeout` | Operation timeout | `5s` |
 | `--cancel-after` | Operation cancel timeout | `5s` |
 
-The timeouts are sized for a transaction that writes several tables, including rows of several kilobytes.
+A request to the query service has one client timeout. `run` passes it the smallest of `--client-timeout`, `--operation-timeout`, and `--cancel-after`. The values are sized for a transaction that writes several tables, including rows of several kilobytes.
 
 ## Example {#example}
 
@@ -445,7 +445,7 @@ After the instance is created, the write phase starts, with error text when need
     --seconds 300
 ```
 
-Removing the workload:
+Dropping the tables:
 
 ```bash
 {{ ydb-cli }} workload replication clean --path replication
