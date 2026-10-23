@@ -1,4 +1,7 @@
+#include <ydb/public/lib/ydb_cli/commands/replication_workload/replication_workload_exec.h>
 #include <ydb/public/lib/ydb_cli/commands/replication_workload/replication_workload_model.h>
+
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/value/value.h>
 
 #include <library/cpp/testing/unittest/registar.h>
 
@@ -128,6 +131,58 @@ Y_UNIT_TEST(KeysAndText) {
     const TString yson = MakeText(EColType::Yson, EFill::Wide, rng);
     UNIT_ASSERT(yson.size() >= 1000 && yson.size() <= 5000);
     UNIT_ASSERT(yson.StartsWith("{v=\""));
+}
+
+Y_UNIT_TEST(ImportBatchUsesAsTable) {
+    const TTable* boolean = Find("pk_bool");
+    const TTable* wide = Find("wide_utf8");
+    UNIT_ASSERT(boolean);
+    UNIT_ASSERT(wide);
+    const TString query = ImportQuery("/db/replication/pk_bool", *boolean);
+    UNIT_ASSERT(query.Contains("DECLARE $input AS List<Struct<"));
+    UNIT_ASSERT(query.Contains("seqno_hash: Uint64"));
+    UNIT_ASSERT(query.Contains("pk: Bool"));
+    UNIT_ASSERT(query.Contains("seq: Uint64"));
+    UNIT_ASSERT(query.Contains("UPSERT INTO `/db/replication/pk_bool`"));
+    UNIT_ASSERT(query.Contains("SELECT * FROM AS_TABLE($input)"));
+    UNIT_ASSERT(!query.Contains("VALUES"));
+
+    const TString wideQuery = ImportQuery("/db/replication/wide_utf8", *wide);
+    UNIT_ASSERT(wideQuery.Contains("c_medium: Utf8"));
+    UNIT_ASSERT(wideQuery.Contains("c_wide: Utf8"));
+    UNIT_ASSERT(wideQuery.Contains("SELECT * FROM AS_TABLE($input)"));
+
+    std::mt19937_64 rng(3);
+    const TVector<TVector<TBoundParam>> rows = MakeImportRows(*boolean, 5, 2, rng);
+    UNIT_ASSERT_VALUES_EQUAL(rows.size(), 2);
+    UNIT_ASSERT_VALUES_EQUAL(rows[0].size(), boolean->Columns.size());
+    for (size_t i = 0; i < boolean->Columns.size(); ++i) {
+        UNIT_ASSERT_VALUES_EQUAL(rows[0][i].Name, boolean->Columns[i].Name);
+    }
+    UNIT_ASSERT_VALUES_EQUAL(rows[0][0].U, HashSeqno(0));
+    UNIT_ASSERT_VALUES_EQUAL(rows[0][2].U, 5);
+    UNIT_ASSERT_VALUES_EQUAL(rows[1][2].U, 6);
+    for (const TVector<TBoundParam>& row : rows) {
+        for (const TBoundParam& param : row) {
+            if (param.Name == "seqno") {
+                UNIT_ASSERT_VALUES_EQUAL(param.U, 0);
+            }
+        }
+    }
+
+    const TParams params = BindImportRows(rows);
+    const std::optional<TValue> value = params.GetValue("$input");
+    UNIT_ASSERT(value);
+    const TString type = FormatType(value->GetType());
+    UNIT_ASSERT(type.Contains("List<Struct<"));
+    UNIT_ASSERT(type.Contains("seqno_hash"));
+    TValueParser parser(*value);
+    parser.OpenList();
+    ui32 items = 0;
+    while (parser.TryNextListItem()) {
+        ++items;
+    }
+    UNIT_ASSERT_VALUES_EQUAL(items, 2);
 }
 
 Y_UNIT_TEST(UpdateTouchesOneToThreeColumnsAndFullKey) {

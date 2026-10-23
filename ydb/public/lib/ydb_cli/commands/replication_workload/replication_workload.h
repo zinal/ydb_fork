@@ -30,6 +30,8 @@ public:
 private:
     TString Path = "replication";
     ui64 Rows = 1000;
+    ui64 BatchSize = 100;
+    ui64 Threads = 1;
 };
 
 class TCommandWorkloadReplicationRun : public TYdbCommand {

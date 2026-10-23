@@ -851,6 +851,56 @@ TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, 
     return params;
 }
 
+TVector<TBoundParam> MakeRowParams(const TTable& table, ui64 n, ui64 seqno, std::mt19937_64& rng) {
+    TVector<TBoundParam> params = MakeKeyParams(table, n, HashSeqno(seqno), "");
+    for (const TColumn& column : table.Columns) {
+        if (column.Key) {
+            continue;
+        }
+        TBoundParam value;
+        if (column.Name == "seqno") {
+            value.Name = "seqno";
+            value.SqlType = "Uint64";
+            value.Kind = EParamKind::Uint64;
+            value.U = seqno;
+        } else {
+            value = MakeValue(column, rng);
+            value.Name = column.Name;
+        }
+        params.push_back(std::move(value));
+    }
+    return params;
+}
+
+TString ImportQuery(const TString& fullName, const TTable& table) {
+    TStringBuilder sql;
+    sql << "DECLARE $input AS List<Struct<\n";
+    for (size_t i = 0; i < table.Columns.size(); ++i) {
+        if (i != 0) {
+            sql << ",\n";
+        }
+        sql << "    " << table.Columns[i].Name << ": " << SqlType(table.Columns[i].Type);
+    }
+    sql << "\n>>;\n";
+    sql << "UPSERT INTO " << QuotePath(fullName) << "\n";
+    sql << "SELECT * FROM AS_TABLE($input);\n";
+    return sql;
+}
+
+TVector<TVector<TBoundParam>> MakeImportRows(
+    const TTable& table,
+    ui64 begin,
+    ui64 count,
+    std::mt19937_64& rng)
+{
+    TVector<TVector<TBoundParam>> rows;
+    rows.reserve(count);
+    for (ui64 row = 0; row < count; ++row) {
+        rows.push_back(MakeRowParams(table, begin + row, 0, rng));
+    }
+    return rows;
+}
+
 TRowWrite MakeInsertWrite(
     const TTable& table,
     const TString& fullName,
@@ -860,22 +910,9 @@ TRowWrite MakeInsertWrite(
     std::mt19937_64& rng)
 {
     TRowWrite write;
-    TVector<TBoundParam> params = MakeKeyParams(table, n, HashSeqno(seqno), prefix);
-    for (const TColumn& column : table.Columns) {
-        if (column.Key) {
-            continue;
-        }
-        TBoundParam value;
-        if (column.Name == "seqno") {
-            value.Name = prefix + "seqno";
-            value.SqlType = "Uint64";
-            value.Kind = EParamKind::Uint64;
-            value.U = seqno;
-        } else {
-            value = MakeValue(column, rng);
-            value.Name = prefix + column.Name;
-        }
-        params.push_back(std::move(value));
+    TVector<TBoundParam> params = MakeRowParams(table, n, seqno, rng);
+    for (TBoundParam& param : params) {
+        param.Name = prefix + param.Name;
     }
     TStringBuilder sql;
     sql << "UPSERT INTO " << QuotePath(fullName) << " (" << ColumnList(table.Columns) << ") VALUES (";

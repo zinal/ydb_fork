@@ -13,6 +13,7 @@ namespace NYdb::NConsoleClient::NReplicationWorkload {
 
 TString WorkloadRoot(const TString& database, const TString& path);
 TParams BindParams(const TVector<TBoundParam>& params);
+TParams BindImportRows(const TVector<TVector<TBoundParam>>& rows);
 
 NQuery::TExecuteQuerySettings MakeQuerySettings(
     const TDuration& clientTimeout,

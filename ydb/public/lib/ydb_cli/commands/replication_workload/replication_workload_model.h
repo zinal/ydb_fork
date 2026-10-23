@@ -195,6 +195,13 @@ TRowWrite MakeInsertWrite(
     const TString& prefix,
     std::mt19937_64& rng);
 
+TString ImportQuery(const TString& fullName, const TTable& table);
+TVector<TVector<TBoundParam>> MakeImportRows(
+    const TTable& table,
+    ui64 begin,
+    ui64 count,
+    std::mt19937_64& rng);
+
 TString BuildScript(const TVector<TRowWrite>& writes);
 
 bool TryReserve(TVector<TTableRuntime>& state, const TVector<std::pair<size_t, ui64>>& inserts, TVector<TReservation>& out);

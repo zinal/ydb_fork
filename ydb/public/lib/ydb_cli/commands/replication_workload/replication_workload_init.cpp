@@ -8,9 +8,14 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/status/status.h>
 
-#include <util/string/cast.h>
+#include <util/generic/yexception.h>
+#include <util/string/builder.h>
+#include <util/system/info.h>
 
+#include <atomic>
+#include <mutex>
 #include <random>
+#include <thread>
 
 namespace NYdb::NConsoleClient {
 
@@ -32,14 +37,6 @@ void EnsureDirectory(const TDriver& driver, const TString& path) {
     if (!status.IsSuccess() && status.GetStatus() != EStatus::ALREADY_EXISTS) {
         NStatusHelpers::ThrowOnError(status);
     }
-}
-
-TVector<TBoundParam> Flatten(const TVector<TRowWrite>& writes) {
-    TVector<TBoundParam> params;
-    for (const TRowWrite& write : writes) {
-        params.insert(params.end(), write.Params.begin(), write.Params.end());
-    }
-    return params;
 }
 
 } // namespace
@@ -78,7 +75,10 @@ int TCommandWorkloadReplicationInit::Run(TConfig& config) {
 
 TCommandWorkloadReplicationImport::TCommandWorkloadReplicationImport()
     : TYdbCommand("import", {}, "Insert the initial rows of the replication workload")
-{}
+{
+    const size_t cpus = NSystemInfo::CachedNumberOfCpus();
+    Threads = cpus == 0 ? 1 : static_cast<ui64>(cpus);
+}
 
 void TCommandWorkloadReplicationImport::Config(TConfig& config) {
     TYdbCommand::Config(config);
@@ -86,17 +86,34 @@ void TCommandWorkloadReplicationImport::Config(TConfig& config) {
         .DefaultValue(Path).StoreResult(&Path);
     config.Opts->AddLongOption("rows", "Number of initial rows in every table")
         .DefaultValue(Rows).StoreResult(&Rows);
+    config.Opts->AddLongOption("batch-size", "Rows in one UPSERT SELECT AS_TABLE request")
+        .DefaultValue(BatchSize).StoreResult(&BatchSize);
+    config.Opts->AddLongOption("threads", "Threads that send import batches. The default is the host vCPU count")
+        .DefaultValue(Threads).StoreResult(&Threads);
 }
 
 int TCommandWorkloadReplicationImport::Run(TConfig& config) {
-    TDriver driver = MakeDriver(config, 0);
+    if (BatchSize == 0) {
+        throw TMisuseException() << "Batch size must be positive";
+    }
+    if (Threads == 0) {
+        throw TMisuseException() << "Thread count must be positive";
+    }
+    TDriver driver = MakeDriver(config, Threads);
     const TString root = WorkloadRoot(config.Database, Path);
     auto clientSettings = NQuery::TClientSettings().SessionPoolSettings(
-        NQuery::TSessionPoolSettings().MaxActiveSessions(8));
+        NQuery::TSessionPoolSettings().MaxActiveSessions(Threads + 4));
     NQuery::TQueryClient client(driver, clientSettings);
     const TDuration timeout = TDuration::Seconds(60);
-    for (const TTable& table : AllTables()) {
+    const TVector<TTable>& tables = AllTables();
+    TVector<TString> fullNames;
+    TVector<TString> queries;
+    fullNames.reserve(tables.size());
+    queries.reserve(tables.size());
+    for (const TTable& table : tables) {
         const TString fullName = JoinPath(root, table.Name);
+        fullNames.push_back(fullName);
+        queries.push_back(ImportQuery(fullName, table));
         const TString key = table.Columns[0].Name;
         const TString probe = "SELECT " + key + " FROM " + QuotePath(fullName) + " LIMIT 1;";
         auto result = client.ExecuteQuery(
@@ -109,20 +126,66 @@ int TCommandWorkloadReplicationImport::Run(TConfig& config) {
             throw TMisuseException() << "Table " << fullName << " already has rows";
         }
     }
-    std::mt19937_64 rng(TInstant::Now().MicroSeconds());
-    for (const TTable& table : AllTables()) {
-        const TString fullName = JoinPath(root, table.Name);
-        const ui64 batch = table.Wide ? 4 : 40;
-        for (ui64 begin = 0; begin < Rows;) {
-            const ui64 count = std::min(batch, Rows - begin);
-            TVector<TRowWrite> writes;
-            for (ui64 row = 0; row < count; ++row) {
-                writes.push_back(MakeInsertWrite(table, fullName, begin + row, 0, TStringBuilder() << "r" << row << "_", rng));
-            }
-            auto status = ExecData(client, BuildScript(writes), BindParams(Flatten(writes)), timeout, timeout, timeout, true);
-            NStatusHelpers::ThrowOnError(status);
-            begin += count;
+    if (Rows == 0) {
+        return EXIT_SUCCESS;
+    }
+
+    std::atomic<size_t> next{0};
+    std::atomic<bool> failed{false};
+    std::mutex errorMutex;
+    TString errorText;
+    const ui64 seedBase = TInstant::Now().MicroSeconds();
+    auto fail = [&](const TString& text) {
+        std::lock_guard<std::mutex> lock(errorMutex);
+        if (errorText.empty()) {
+            errorText = text;
         }
+        failed.store(true);
+    };
+    auto worker = [&]() {
+        while (!failed.load()) {
+            const size_t index = next.fetch_add(1);
+            if (index >= tables.size()) {
+                return;
+            }
+            std::mt19937_64 rng(seedBase + index);
+            for (ui64 begin = 0; begin < Rows && !failed.load(); begin += BatchSize) {
+                const ui64 count = std::min(BatchSize, Rows - begin);
+                try {
+                    const TVector<TVector<TBoundParam>> rows = MakeImportRows(tables[index], begin, count, rng);
+                    const TStatus status = ExecData(
+                        client,
+                        queries[index],
+                        BindImportRows(rows),
+                        timeout,
+                        timeout,
+                        timeout,
+                        true);
+                    if (!status.IsSuccess()) {
+                        fail(TStringBuilder() << "table " << fullNames[index]
+                            << " error status=" << status.GetStatus()
+                            << " issues=" << status.GetIssues().ToString());
+                    }
+                } catch (const std::exception& ex) {
+                    fail(TStringBuilder() << "table " << fullNames[index] << " " << ex.what());
+                } catch (...) {
+                    fail(TStringBuilder() << "table " << fullNames[index] << " import failed");
+                }
+            }
+        }
+    };
+
+    const ui64 workerCount = std::min<ui64>(Threads, tables.size());
+    TVector<std::thread> pool;
+    pool.reserve(workerCount);
+    for (ui64 i = 0; i < workerCount; ++i) {
+        pool.emplace_back(worker);
+    }
+    for (std::thread& thread : pool) {
+        thread.join();
+    }
+    if (failed.load()) {
+        throw yexception() << errorText;
     }
     return EXIT_SUCCESS;
 }
