@@ -227,3 +227,24 @@
 | Partition sessions started | Количество сессий чтения топика читателем, запущенных в секунду |
 
 Скачать шаблон дашборда **Topic — Consumer**: [topic-consumer.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/topic-consumer.json).
+
+## Поток данных асинхронной репликации {#async-replication-flow}
+
+Оценка трафика CDC для [асинхронной репликации](../../../concepts/async-replication.md) одной базы по счётчикам записи строк DataShard. Потоки изменений создавать не нужно. Фильтры дашборда:
+
+- `database` — база, таблицы которой будут реплицироваться;
+- `Aggregation interval` — окно `rate()`, которым сглаживается ряд;
+- `ds` — источник Prometheus.
+
+Каждый поток выражен за минуту: `rate(counter[$agg]) * 60`. Смена интервала агрегирования не меняет единицу измерения.
+
+| Имя | Описание |
+| --- | --- |
+| Payload, bytes per minute | Средний объём полезной нагрузки ячеек в минуту. Ключ и записанные ячейки, минус 8 байт на каждое удаление. Это тело топика в формате `BINARY` и нижняя граница для `JSON`. |
+| Records per minute | Среднее число обновлений и удалений строк в минуту. Каждая операция — одна запись CDC. |
+| Cell bytes per record | Полезная нагрузка, делённая на число записей. От интервала агрегирования не зависит. |
+| Payload by operation, bytes per minute | Та же нагрузка отдельно по обновлениям и удалениям. |
+| CDC topic write and read, bytes per minute | Запись в топик — это полезная нагрузка. Чтение из топика добавляет 70 байт метаданных Topic API на запись. |
+| Records by operation, rows per minute | Обновления и удаления в минуту. |
+
+Скачать шаблон дашборда **Async replication data flow**: [async-replication-flow.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/async-replication-flow.json).
