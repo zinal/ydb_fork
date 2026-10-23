@@ -75,8 +75,7 @@ Y_UNIT_TEST(IndexesAndPartitions) {
     UNIT_ASSERT(narrowDdl.Contains("seqno_hash Uint64 NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("pk Bool NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("seq Uint64 NOT NULL"));
-    UNIT_ASSERT(narrowDdl.Contains("seqno Uint64,"));
-    UNIT_ASSERT(!narrowDdl.Contains("seqno Uint64 NOT NULL"));
+    UNIT_ASSERT(narrowDdl.Contains("seqno Uint64 NOT NULL"));
     UNIT_ASSERT(!narrowDdl.Contains("UNIFORM_PARTITIONS"));
     UNIT_ASSERT(narrowDdl.Contains("AUTO_PARTITIONING_BY_LOAD = ENABLED"));
     UNIT_ASSERT(narrowDdl.Contains("AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 3"));
@@ -160,7 +159,9 @@ Y_UNIT_TEST(ImportBatchUsesAsTable) {
     UNIT_ASSERT(!query.Contains("seqno_hash: Uint64?"));
     UNIT_ASSERT(query.Contains("pk: Bool"));
     UNIT_ASSERT(!query.Contains("pk: Bool?"));
-    UNIT_ASSERT(query.Contains("seqno: Uint64?"));
+    UNIT_ASSERT(query.Contains("seqno: Uint64"));
+    UNIT_ASSERT(!query.Contains("seqno: Uint64?"));
+    UNIT_ASSERT(query.Contains("c_float: Float?"));
     UNIT_ASSERT(query.Contains("seq: Uint64"));
     UNIT_ASSERT(query.Contains("UPSERT INTO `/db/replication/pk_bool`"));
     UNIT_ASSERT(query.Contains("SELECT * FROM AS_TABLE($input)"));
@@ -293,8 +294,8 @@ Y_UNIT_TEST(InsertNullsOneOptionalColumn) {
     for (const TVector<TBoundParam>& row : rows) {
         ui32 nulls = 0;
         for (const TBoundParam& param : row) {
-            const bool key = param.Name == "pk";
-            if (key) {
+            const bool required = param.Name == "pk" || param.Name == "seqno";
+            if (required) {
                 UNIT_ASSERT(!param.Optional);
                 UNIT_ASSERT(!param.Null);
                 continue;
@@ -326,6 +327,10 @@ Y_UNIT_TEST(UpdateNullsOneAssignedValue) {
         for (const TRowWrite& write : plan.Writes) {
             ui32 nulls = 0;
             for (const TBoundParam& param : write.Params) {
+                if (param.Name.EndsWith("seqno") && !param.Name.EndsWith("seqno_hash")) {
+                    UNIT_ASSERT(!param.Optional);
+                    UNIT_ASSERT(!param.Null);
+                }
                 if (param.Null) {
                     UNIT_ASSERT(param.Optional);
                     ++nulls;

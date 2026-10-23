@@ -604,7 +604,7 @@ TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minP
     out << "CREATE TABLE " << QuotePath(fullName) << " (";
     for (const TColumn& column : table.Columns) {
         out << column.Name << " " << SqlType(column.Type);
-        if (column.Key) {
+        if (column.Key || column.Name == "seqno") {
             out << " NOT NULL";
         }
         out << ", ";
@@ -880,8 +880,8 @@ TVector<TBoundParam> MakeRowParams(const TTable& table, ui64 n, ui64 seqno, std:
         } else {
             value = MakeValue(column, rng);
             value.Name = column.Name;
+            value.Optional = true;
         }
-        value.Optional = true;
         params.push_back(std::move(value));
     }
     MaybeNullValue(params, rng, 10);
@@ -896,7 +896,7 @@ TString ImportQuery(const TString& fullName, const TTable& table) {
             sql << ",\n";
         }
         sql << "    " << table.Columns[i].Name << ": " << SqlType(table.Columns[i].Type);
-        if (!table.Columns[i].Key) {
+        if (!table.Columns[i].Key && table.Columns[i].Name != "seqno") {
             sql << "?";
         }
     }
@@ -1110,8 +1110,8 @@ TTxPlan BuildTransaction(
                 } else {
                     value = MakeValue(*chosen[i], rng);
                     value.Name = prefix + chosen[i]->Name;
+                    value.Optional = true;
                 }
-                value.Optional = true;
                 sql << chosen[i]->Name << " = $" << value.Name;
                 params.push_back(std::move(value));
             }
