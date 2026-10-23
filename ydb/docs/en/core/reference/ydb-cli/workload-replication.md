@@ -264,9 +264,21 @@ If the minimum is greater than the maximum, `init` fails with a parameter error 
 
 ## Initial fill {#import}
 
-`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. On `pk_bool` and `pk_decimal_narrow` the `seqno_hash` column of the load equals the hash of zero. A load batch is idempotent: a retry writes the same keys with the same `UPSERT` and `seqno` 0.
+`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every one of these rows has `seqno` equal to 0. On `pk_bool` and `pk_decimal_narrow` the `seqno_hash` column of the load equals the hash of zero.
 
-The command finishes after all of these rows are committed. Rows of one table may be written by several transactions; the batch size does not affect the `run` scenario.
+Rows are written in batches. One batch holds at most `--batch-size` rows, 100 by default. The last batch of a table is shorter when Q is not divisible by that size. A batch is one query:
+
+```sql
+DECLARE $input AS List<Struct<...>>;
+UPSERT INTO `<table>`
+SELECT * FROM AS_TABLE($input);
+```
+
+Struct fields have the same names as the table columns and follow the same order. A batch is idempotent: a retry writes the same rows with the same `UPSERT` and `seqno` 0.
+
+Batches of one table are sent one after another. Different tables are processed at the same time. `--threads` sets the thread count; by default it is the number of vCPUs on the current host. The number of tables in progress at once is the smaller of that thread count and the number of tables in the directory.
+
+The command finishes after all of these rows are committed. The batch size does not affect the `run` scenario.
 
 A repeated `import` when rows are already present fails the command and does not rewrite the table. The working order is one `import` after `init`.
 
@@ -384,6 +396,8 @@ Shared by `init`, `import`, `run`, and `clean`:
 | Parameter | Description | Default |
 | --- | --- | --- |
 | `--rows` | Q, the number of initial rows in every table | `1000` |
+| `--batch-size` | Rows in one `UPSERT … SELECT * FROM AS_TABLE` request | `100` |
+| `--threads` | Threads that send batches. The default is the number of vCPUs on the current host | host vCPUs |
 
 `run`:
 
