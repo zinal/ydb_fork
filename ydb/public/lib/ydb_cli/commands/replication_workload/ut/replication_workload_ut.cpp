@@ -131,6 +131,17 @@ Y_UNIT_TEST(KeysAndText) {
     const TString yson = MakeText(EColType::Yson, EFill::Wide, rng);
     UNIT_ASSERT(yson.size() >= 1000 && yson.size() <= 5000);
     UNIT_ASSERT(yson.StartsWith("{v=\""));
+    UNIT_ASSERT(yson.find("aaaaaaaa") == TString::npos);
+
+    std::mt19937_64 utf8Rng(7);
+    std::mt19937_64 utf8RngAgain(7);
+    const TString utf8 = MakeText(EColType::Utf8, EFill::Wide, utf8Rng);
+    UNIT_ASSERT(utf8.size() >= 1000 && utf8.size() <= 5000);
+    UNIT_ASSERT_VALUES_EQUAL(utf8, MakeText(EColType::Utf8, EFill::Wide, utf8RngAgain));
+    UNIT_ASSERT(utf8.find_first_not_of('a') != TString::npos);
+    for (unsigned char ch : utf8) {
+        UNIT_ASSERT(ch >= 32 && ch < 127);
+    }
 }
 
 Y_UNIT_TEST(ImportBatchUsesAsTable) {

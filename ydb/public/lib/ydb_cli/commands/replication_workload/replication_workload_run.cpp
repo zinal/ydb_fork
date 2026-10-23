@@ -1,5 +1,6 @@
 #include "replication_workload.h"
 #include "replication_workload_exec.h"
+#include "replication_workload_text.h"
 
 #include <ydb/public/lib/ydb_cli/common/duration.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/driver/driver.h>
@@ -398,6 +399,7 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
         NQuery::TSessionPoolSettings().MaxActiveSessions(Users + 4));
     NQuery::TQueryClient client(driver, clientSettings);
 
+    PrepareTpchText();
     TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, clientTimeout, operationTimeout, cancelAfter, seed, config.IsVerbose());
     runner.Load(clientTimeout);
     runner.SetSeqno(static_cast<ui64>(TInstant::Now().MicroSeconds()));

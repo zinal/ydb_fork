@@ -1,4 +1,5 @@
 #include "replication_workload_model.h"
+#include "replication_workload_text.h"
 
 #include <openssl/sha.h>
 
@@ -130,11 +131,7 @@ ui64 UniformSize(std::mt19937_64& rng, ui64 lo, ui64 hi) {
     return dist(rng);
 }
 
-TString RepeatChar(char ch, size_t n) {
-    return TString(n, ch);
-}
-
-TString JsonOfSize(ui64 size) {
+TString JsonOfSize(ui64 size, std::mt19937_64& rng) {
     if (size < 2) {
         size = 2;
     }
@@ -156,10 +153,10 @@ TString JsonOfSize(ui64 size) {
     if (size == 7) {
         return "\"abcde\"";
     }
-    return TString("{\"v\":\"") + RepeatChar('a', size - 8) + "\"}";
+    return TString("{\"v\":\"") + TpchText(size - 8, rng()) + "\"}";
 }
 
-TString YsonOfSize(ui64 size) {
+TString YsonOfSize(ui64 size, std::mt19937_64& rng) {
     if (size < 1) {
         size = 1;
     }
@@ -178,7 +175,7 @@ TString YsonOfSize(ui64 size) {
     if (size == 5) {
         return "{a=1}";
     }
-    return TString("{v=\"") + RepeatChar('a', size - 6) + "\"}";
+    return TString("{v=\"") + TpchText(size - 6, rng()) + "\"}";
 }
 
 i64 RandomI64(std::mt19937_64& rng, i64 lo, i64 hi) {
@@ -693,13 +690,13 @@ TString MakeText(EColType type, EFill fill, std::mt19937_64& rng) {
         size = UniformSize(rng, 1000, 5000);
     }
     if (type == EColType::Json || type == EColType::JsonDocument) {
-        return JsonOfSize(size);
+        return JsonOfSize(size, rng);
     }
     if (type == EColType::Yson) {
-        return YsonOfSize(size);
+        return YsonOfSize(size, rng);
     }
     if (type == EColType::Utf8) {
-        return RepeatChar('a', size);
+        return TpchText(size, rng());
     }
     TString bytes(size, '\0');
     std::uniform_int_distribution<int> byte(0, 255);

@@ -1,5 +1,6 @@
 #include "replication_workload.h"
 #include "replication_workload_exec.h"
+#include "replication_workload_text.h"
 
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/driver/driver.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/query/client.h>
@@ -129,6 +130,7 @@ int TCommandWorkloadReplicationImport::Run(TConfig& config) {
     if (Rows == 0) {
         return EXIT_SUCCESS;
     }
+    PrepareTpchText();
 
     std::atomic<size_t> next{0};
     std::atomic<bool> failed{false};

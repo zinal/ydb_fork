@@ -10,10 +10,12 @@ SRCS(
     replication_workload_init.cpp
     replication_workload_model.cpp
     replication_workload_run.cpp
+    replication_workload_text.cpp
 )
 
 PEERDIR(
     contrib/libs/openssl
+    ydb/library/workload/tpch
     ydb/public/lib/ydb_cli/common
     ydb/public/sdk/cpp/src/client/driver
     ydb/public/sdk/cpp/src/client/params
