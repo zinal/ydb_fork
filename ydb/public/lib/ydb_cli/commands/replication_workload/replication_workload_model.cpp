@@ -604,7 +604,7 @@ TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minP
     out << "CREATE TABLE " << QuotePath(fullName) << " (";
     for (const TColumn& column : table.Columns) {
         out << column.Name << " " << SqlType(column.Type);
-        if (column.Key || column.Name == "seqno") {
+        if (column.Key) {
             out << " NOT NULL";
         }
         out << ", ";
@@ -848,6 +848,23 @@ TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, 
     return params;
 }
 
+void MaybeNullValue(TVector<TBoundParam>& params, std::mt19937_64& rng, int percent) {
+    TVector<size_t> candidates;
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (params[i].Optional) {
+            candidates.push_back(i);
+        }
+    }
+    if (candidates.empty() || percent <= 0) {
+        return;
+    }
+    if (std::uniform_int_distribution<int>(1, 100)(rng) > percent) {
+        return;
+    }
+    const size_t pick = candidates[std::uniform_int_distribution<size_t>(0, candidates.size() - 1)(rng)];
+    params[pick].Null = true;
+}
+
 TVector<TBoundParam> MakeRowParams(const TTable& table, ui64 n, ui64 seqno, std::mt19937_64& rng) {
     TVector<TBoundParam> params = MakeKeyParams(table, n, HashSeqno(seqno), "");
     for (const TColumn& column : table.Columns) {
@@ -864,8 +881,10 @@ TVector<TBoundParam> MakeRowParams(const TTable& table, ui64 n, ui64 seqno, std:
             value = MakeValue(column, rng);
             value.Name = column.Name;
         }
+        value.Optional = true;
         params.push_back(std::move(value));
     }
+    MaybeNullValue(params, rng, 10);
     return params;
 }
 
@@ -877,6 +896,9 @@ TString ImportQuery(const TString& fullName, const TTable& table) {
             sql << ",\n";
         }
         sql << "    " << table.Columns[i].Name << ": " << SqlType(table.Columns[i].Type);
+        if (!table.Columns[i].Key) {
+            sql << "?";
+        }
     }
     sql << "\n>>;\n";
     sql << "UPSERT INTO " << QuotePath(fullName) << "\n";
@@ -930,7 +952,11 @@ TString BuildScript(const TVector<TRowWrite>& writes) {
     TStringBuilder body;
     for (const TRowWrite& write : writes) {
         for (const TBoundParam& param : write.Params) {
-            declares << "DECLARE $" << param.Name << " AS " << param.SqlType << ";\n";
+            declares << "DECLARE $" << param.Name << " AS " << param.SqlType;
+            if (param.Optional) {
+                declares << "?";
+            }
+            declares << ";\n";
         }
         body << write.Statement << "\n";
     }
@@ -1085,9 +1111,11 @@ TTxPlan BuildTransaction(
                     value = MakeValue(*chosen[i], rng);
                     value.Name = prefix + chosen[i]->Name;
                 }
+                value.Optional = true;
                 sql << chosen[i]->Name << " = $" << value.Name;
                 params.push_back(std::move(value));
             }
+            MaybeNullValue(params, rng, 1);
             sql << " WHERE ";
             ui64 seqnoHash = HashSeqno(0);
             if (table.SeqnoHashPrefix) {

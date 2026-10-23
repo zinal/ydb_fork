@@ -134,6 +134,8 @@ struct TBoundParam {
     TString Name;
     TString SqlType;
     EParamKind Kind = EParamKind::Uint64;
+    bool Optional = false;
+    bool Null = false;
     bool Bool = false;
     i64 I = 0;
     ui64 U = 0;
@@ -184,6 +186,9 @@ ui64 HashSeqno(ui64 seqno);
 TString HashBytes(ui64 n);
 TString HashHex(ui64 n);
 TString MakeText(EColType type, EFill fill, std::mt19937_64& rng);
+
+// Among params with Optional set, with probability percent/100 mark exactly one Null.
+void MaybeNullValue(TVector<TBoundParam>& params, std::mt19937_64& rng, int percent);
 TBoundParam MakeValue(const TColumn& column, std::mt19937_64& rng);
 TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, const TString& namePrefix);
 

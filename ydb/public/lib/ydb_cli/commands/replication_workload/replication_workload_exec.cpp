@@ -15,8 +15,69 @@ TString WorkloadRoot(const TString& database, const TString& path) {
     return JoinPath(database, path);
 }
 
-TValue MakeBoundValue(const TBoundParam& param) {
-    TValueBuilder builder;
+EPrimitiveType PrimitiveOf(const TBoundParam& param) {
+    switch (param.Kind) {
+        case EParamKind::Bool:
+            return EPrimitiveType::Bool;
+        case EParamKind::Int8:
+            return EPrimitiveType::Int8;
+        case EParamKind::Uint8:
+            return EPrimitiveType::Uint8;
+        case EParamKind::Int16:
+            return EPrimitiveType::Int16;
+        case EParamKind::Uint16:
+            return EPrimitiveType::Uint16;
+        case EParamKind::Int32:
+            return EPrimitiveType::Int32;
+        case EParamKind::Uint32:
+            return EPrimitiveType::Uint32;
+        case EParamKind::Int64:
+            return EPrimitiveType::Int64;
+        case EParamKind::Uint64:
+            return EPrimitiveType::Uint64;
+        case EParamKind::Float:
+            return EPrimitiveType::Float;
+        case EParamKind::Double:
+            return EPrimitiveType::Double;
+        case EParamKind::Text:
+            if (param.SqlType == "String") {
+                return EPrimitiveType::String;
+            }
+            if (param.SqlType == "Json") {
+                return EPrimitiveType::Json;
+            }
+            if (param.SqlType == "JsonDocument") {
+                return EPrimitiveType::JsonDocument;
+            }
+            if (param.SqlType == "Yson") {
+                return EPrimitiveType::Yson;
+            }
+            return EPrimitiveType::Utf8;
+        case EParamKind::Decimal:
+            return EPrimitiveType::Utf8;
+        case EParamKind::Uuid:
+            return EPrimitiveType::Uuid;
+        case EParamKind::DateDays:
+            return EPrimitiveType::Date;
+        case EParamKind::Date32Days:
+            return EPrimitiveType::Date32;
+        case EParamKind::DatetimeSeconds:
+            return EPrimitiveType::Datetime;
+        case EParamKind::Datetime64Seconds:
+            return EPrimitiveType::Datetime64;
+        case EParamKind::TimestampUs:
+            return EPrimitiveType::Timestamp;
+        case EParamKind::Timestamp64Us:
+            return EPrimitiveType::Timestamp64;
+        case EParamKind::IntervalUs:
+            return EPrimitiveType::Interval;
+        case EParamKind::Interval64Us:
+            return EPrimitiveType::Interval64;
+    }
+    return EPrimitiveType::Utf8;
+}
+
+void FillBound(TValueBuilder& builder, const TBoundParam& param) {
     switch (param.Kind) {
         case EParamKind::Bool:
             builder.Bool(param.Bool);
@@ -100,6 +161,30 @@ TValue MakeBoundValue(const TBoundParam& param) {
         case EParamKind::Interval64Us:
             builder.Interval64(TWideMicroseconds(param.I));
             break;
+    }
+}
+
+TValue NullValue(const TBoundParam& param) {
+    TValueBuilder builder;
+    if (param.Kind == EParamKind::Decimal) {
+        builder.EmptyOptional(TTypeBuilder().Decimal(TDecimalType(param.Precision, param.Scale)).Build());
+    } else {
+        builder.EmptyOptional(PrimitiveOf(param));
+    }
+    return builder.Build();
+}
+
+TValue MakeBoundValue(const TBoundParam& param) {
+    if (param.Null) {
+        return NullValue(param);
+    }
+    TValueBuilder builder;
+    if (param.Optional) {
+        builder.BeginOptional();
+    }
+    FillBound(builder, param);
+    if (param.Optional) {
+        builder.EndOptional();
     }
     return builder.Build();
 }

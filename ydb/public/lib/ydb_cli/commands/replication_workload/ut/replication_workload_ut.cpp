@@ -72,6 +72,11 @@ Y_UNIT_TEST(IndexesAndPartitions) {
     UNIT_ASSERT(narrowDdl.Contains("INDEX seqno_idx GLOBAL SYNC ON (seqno)"));
     UNIT_ASSERT(narrowDdl.Contains("INDEX seq_idx GLOBAL SYNC ON (seq)"));
     UNIT_ASSERT(narrowDdl.Contains("PRIMARY KEY (seqno_hash, pk, seq)"));
+    UNIT_ASSERT(narrowDdl.Contains("seqno_hash Uint64 NOT NULL"));
+    UNIT_ASSERT(narrowDdl.Contains("pk Bool NOT NULL"));
+    UNIT_ASSERT(narrowDdl.Contains("seq Uint64 NOT NULL"));
+    UNIT_ASSERT(narrowDdl.Contains("seqno Uint64,"));
+    UNIT_ASSERT(!narrowDdl.Contains("seqno Uint64 NOT NULL"));
     UNIT_ASSERT(!narrowDdl.Contains("UNIFORM_PARTITIONS"));
     UNIT_ASSERT(narrowDdl.Contains("AUTO_PARTITIONING_BY_LOAD = ENABLED"));
     UNIT_ASSERT(narrowDdl.Contains("AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 3"));
@@ -152,7 +157,10 @@ Y_UNIT_TEST(ImportBatchUsesAsTable) {
     const TString query = ImportQuery("/db/replication/pk_bool", *boolean);
     UNIT_ASSERT(query.Contains("DECLARE $input AS List<Struct<"));
     UNIT_ASSERT(query.Contains("seqno_hash: Uint64"));
+    UNIT_ASSERT(!query.Contains("seqno_hash: Uint64?"));
     UNIT_ASSERT(query.Contains("pk: Bool"));
+    UNIT_ASSERT(!query.Contains("pk: Bool?"));
+    UNIT_ASSERT(query.Contains("seqno: Uint64?"));
     UNIT_ASSERT(query.Contains("seq: Uint64"));
     UNIT_ASSERT(query.Contains("UPSERT INTO `/db/replication/pk_bool`"));
     UNIT_ASSERT(query.Contains("SELECT * FROM AS_TABLE($input)"));
@@ -233,6 +241,130 @@ Y_UNIT_TEST(UpdateTouchesOneToThreeColumnsAndFullKey) {
         }
     }
     UNIT_ASSERT(sawUpdate);
+}
+
+Y_UNIT_TEST(NullValueIsOptionalAndEmpty) {
+    TBoundParam present;
+    present.Name = "seqno";
+    present.SqlType = "Uint64";
+    present.Kind = EParamKind::Uint64;
+    present.Optional = true;
+    present.U = 5;
+    const std::optional<TValue> filled = BindParams({present}).GetValue("$seqno");
+    UNIT_ASSERT(filled);
+    {
+        TValueParser parser(*filled);
+        const std::optional<ui64> value = parser.GetOptionalUint64();
+        UNIT_ASSERT(value.has_value());
+        UNIT_ASSERT_VALUES_EQUAL(*value, 5);
+    }
+
+    present.Null = true;
+    const std::optional<TValue> empty = BindParams({present}).GetValue("$seqno");
+    UNIT_ASSERT(empty);
+    {
+        TValueParser parser(*empty);
+        UNIT_ASSERT(!parser.GetOptionalUint64().has_value());
+    }
+
+    TBoundParam decimal;
+    decimal.Name = "c_decimal";
+    decimal.SqlType = "Decimal(22, 9)";
+    decimal.Kind = EParamKind::Decimal;
+    decimal.Precision = 22;
+    decimal.Scale = 9;
+    decimal.Optional = true;
+    decimal.Null = true;
+    const std::optional<TValue> nullDecimal = BindParams({decimal}).GetValue("$c_decimal");
+    UNIT_ASSERT(nullDecimal);
+    {
+        TValueParser parser(*nullDecimal);
+        parser.OpenOptional();
+        UNIT_ASSERT(parser.IsNull());
+    }
+}
+
+Y_UNIT_TEST(InsertNullsOneOptionalColumn) {
+    const TTable* table = Find("pk_uint64");
+    UNIT_ASSERT(table);
+    std::mt19937_64 rng(11);
+    ui32 rowsWithNull = 0;
+    const TVector<TVector<TBoundParam>> rows = MakeImportRows(*table, 0, 200, rng);
+    for (const TVector<TBoundParam>& row : rows) {
+        ui32 nulls = 0;
+        for (const TBoundParam& param : row) {
+            const bool key = param.Name == "pk";
+            if (key) {
+                UNIT_ASSERT(!param.Optional);
+                UNIT_ASSERT(!param.Null);
+                continue;
+            }
+            UNIT_ASSERT(param.Optional);
+            if (param.Null) {
+                ++nulls;
+            }
+        }
+        UNIT_ASSERT(nulls <= 1);
+        rowsWithNull += nulls;
+    }
+    UNIT_ASSERT(rowsWithNull >= 5 && rowsWithNull <= 50);
+}
+
+Y_UNIT_TEST(UpdateNullsOneAssignedValue) {
+    const TVector<TTable>& tables = AllTables();
+    std::mt19937_64 rng(19);
+    ui32 nullUpdates = 0;
+    for (int i = 0; i < 400; ++i) {
+        TVector<TTableRuntime> state(tables.size());
+        for (TTableRuntime& table : state) {
+            table.Boundary = 30;
+        }
+        const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 1000 + i, 4, rng);
+        if (plan.Busy) {
+            continue;
+        }
+        for (const TRowWrite& write : plan.Writes) {
+            ui32 nulls = 0;
+            for (const TBoundParam& param : write.Params) {
+                if (param.Null) {
+                    UNIT_ASSERT(param.Optional);
+                    ++nulls;
+                } else if (!param.Optional) {
+                    UNIT_ASSERT(!param.Null);
+                }
+            }
+            UNIT_ASSERT(nulls <= 1);
+            if (write.Update && nulls == 1) {
+                ++nullUpdates;
+            }
+        }
+    }
+    UNIT_ASSERT(nullUpdates >= 1);
+}
+
+Y_UNIT_TEST(MaybeNullValueHitsRequestedRate) {
+    auto trials = [](int percent) {
+        std::mt19937_64 rng(percent * 17 + 3);
+        ui32 hits = 0;
+        for (int i = 0; i < 4000; ++i) {
+            TVector<TBoundParam> params(4);
+            for (TBoundParam& param : params) {
+                param.Optional = true;
+            }
+            MaybeNullValue(params, rng, percent);
+            ui32 nulls = 0;
+            for (const TBoundParam& param : params) {
+                nulls += param.Null ? 1 : 0;
+            }
+            UNIT_ASSERT(nulls <= 1);
+            hits += nulls;
+        }
+        return hits;
+    };
+    const ui32 inserts = trials(10);
+    UNIT_ASSERT(inserts >= 320 && inserts <= 480);
+    const ui32 updates = trials(1);
+    UNIT_ASSERT(updates >= 15 && updates <= 70);
 }
 
 Y_UNIT_TEST(ReservationKeepsDensePrefix) {
