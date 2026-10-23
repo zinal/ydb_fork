@@ -338,7 +338,7 @@ The transaction writes **R** rows into every selected table. R is chosen uniform
 
 An insert fills every column and is performed with `UPSERT`. With probability 10%, one random value field of that row, other than `seqno`, is `NULL`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. With probability 1%, one of these assigned values, other than `seqno`, is `NULL`. When the set contains only `seqno`, no empty value is written. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `seqno_hash`, `pk`, and `seq`. The `seqno_hash` value is the hash written when the row was inserted.
 
-Each statement is sent as its own query inside one interactive serializable transaction. The transaction is opened, the statements run one after another, and the last query commits it. When a statement fails, the client rolls the transaction back and the retry handler starts it again.
+Each statement is sent as its own query inside one interactive serializable transaction. The first query opens the transaction, the following queries continue it, and a separate call commits it. The whole attempt runs in the SDK retry handler with the idempotent flag set. The status of a statement or of the commit is returned to that handler. When the status is retriable, the handler runs the whole attempt again.
 
 A query text is the parameter declarations plus one statement. A parameter name is the column name. Every insert into one table therefore has the same text, listing every column. An update text is determined by the table and by the set of columns in `SET`. Columns of that set are listed by name, so one set produces one text. An empty value leaves the text unchanged: every value column other than `seqno` is declared with an optional type. A repeated text lets the server take an already built plan from the cache.
 
@@ -414,9 +414,9 @@ Shared by `init`, `import`, `run`, and `clean`:
 | `--threads` | Client pool threads. 0 means an adaptive pool | `0` |
 | `--window` | Rate output window, seconds | `1` |
 | `--seed` | Generator seed. Without the parameter the seed is taken from the current time | — |
-| `--timeout` | Timeout of each request: opening the transaction, a statement, and a rollback. A plain number with no suffix is milliseconds | `10s` |
+| `--timeout` | Timeout of each request: a statement and the transaction commit. A plain number with no suffix is milliseconds | `10s` |
 
-A request to the query service has one client timeout, and `run` sets it with `--timeout`. The limit applies to a single request, including a statement that writes a row of several kilobytes. A transaction of several statements may take several such limits. The initial boundary read uses a separate, longer deadline: see [reading the boundary](#boundary-read).
+A request to the query service has one client timeout, and `run` sets it with `--timeout`. The limit applies to a single request, a statement or the commit, including a statement that writes a row of several kilobytes. A transaction of several statements may take several such limits. The initial boundary read uses a separate, longer deadline: see [reading the boundary](#boundary-read).
 
 ## Example {#example}
 
