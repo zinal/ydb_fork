@@ -290,7 +290,7 @@ An update addresses a row that already exists. For that, every table has a bound
 
 ### Reading the boundary at the start of `run` {#boundary-read}
 
-Before the first transaction the command reads the boundary of every table from the database once.
+Before the first transaction the command reads the boundary of every table from the database once. The read is an online read-only query and does not take a serializable lock. Its deadline is at least 10 minutes and at least `--client-timeout`. Queries to different tables run in parallel.
 
 For a composite key the number is stored in `seq`. These tables are `pk_bool`, `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, `pk_date`, and `pk_decimal_narrow`. The boundary is read as follows:
 
@@ -414,7 +414,7 @@ Shared by `init`, `import`, `run`, and `clean`:
 | `--operation-timeout` | Operation timeout | `5s` |
 | `--cancel-after` | Operation cancel timeout | `5s` |
 
-A request to the query service has one client timeout. `run` passes it the smallest of `--client-timeout`, `--operation-timeout`, and `--cancel-after`. The values are sized for a transaction that writes several tables, including rows of several kilobytes.
+A request to the query service has one client timeout. For write transactions, `run` passes it the smallest of `--client-timeout`, `--operation-timeout`, and `--cancel-after`. The values are sized for a transaction that writes several tables, including rows of several kilobytes. The initial boundary read uses a separate, longer deadline: see [reading the boundary](#boundary-read).
 
 ## Example {#example}
 
