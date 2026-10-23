@@ -372,6 +372,74 @@ Y_UNIT_TEST(MaybeNullValueHitsRequestedRate) {
     UNIT_ASSERT(updates >= 15 && updates <= 70);
 }
 
+Y_UNIT_TEST(StatementsStayStable) {
+    const TTable* table = Find("pk_uint64");
+    UNIT_ASSERT(table);
+    std::mt19937_64 leftRng(1);
+    std::mt19937_64 rightRng(2);
+    const TRowWrite left = MakeInsertWrite(*table, "/db/replication/pk_uint64", 1, 10, leftRng);
+    const TRowWrite right = MakeInsertWrite(*table, "/db/replication/pk_uint64", 2, 20, rightRng);
+    UNIT_ASSERT_VALUES_EQUAL(left.Statement, right.Statement);
+    UNIT_ASSERT(left.Statement.Contains("DECLARE $pk AS Uint64;\n"));
+    UNIT_ASSERT(left.Statement.Contains("DECLARE $seqno AS Uint64;\n"));
+    UNIT_ASSERT(!left.Statement.Contains("DECLARE $seqno AS Uint64?;"));
+    UNIT_ASSERT(left.Statement.Contains("DECLARE $c_utf8 AS Utf8?;\n"));
+    UNIT_ASSERT(left.Statement.Contains("DECLARE $c_decimal AS Decimal(22, 9)?;\n"));
+    UNIT_ASSERT(left.Statement.Contains("UPSERT INTO `/db/replication/pk_uint64`"));
+    UNIT_ASSERT(left.Statement.EndsWith(");"));
+    UNIT_ASSERT_VALUES_EQUAL(left.Params[1].U, 10);
+    UNIT_ASSERT_VALUES_EQUAL(right.Params[1].U, 20);
+    ui32 upserts = 0;
+    for (size_t pos = 0; (pos = left.Statement.find("UPSERT INTO", pos)) != TString::npos; pos += 11) {
+        ++upserts;
+    }
+    UNIT_ASSERT_VALUES_EQUAL(upserts, 1);
+
+    const TVector<TTable>& tables = AllTables();
+    THashMap<TString, TString> textByShape;
+    ui32 repeated = 0;
+    bool sawMultiInsert = false;
+    for (int i = 0; i < 40; ++i) {
+        TVector<TTableRuntime> state(tables.size());
+        for (TTableRuntime& runtime : state) {
+            runtime.Boundary = 20;
+        }
+        std::mt19937_64 rng(100 + i);
+        const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 500 + i, 10, rng);
+        if (plan.Busy) {
+            continue;
+        }
+        THashMap<TString, ui32> upsertsByTable;
+        for (const TRowWrite& write : plan.Writes) {
+            const bool upsert = write.Statement.Contains("UPSERT INTO");
+            const bool update = write.Statement.Contains("UPDATE ");
+            UNIT_ASSERT(upsert != update);
+            UNIT_ASSERT(!write.Statement.Contains("p0_"));
+            const size_t pos = upsert ? write.Statement.find("UPSERT INTO") : write.Statement.find("UPDATE ");
+            UNIT_ASSERT(pos != TString::npos && pos > 0);
+            const TString shape = write.Statement.substr(pos);
+            if (const TString* previous = textByShape.FindPtr(shape)) {
+                UNIT_ASSERT_VALUES_EQUAL(*previous, write.Statement);
+                ++repeated;
+            } else {
+                textByShape[shape] = write.Statement;
+            }
+            if (upsert) {
+                const size_t path = shape.find('`');
+                if (++upsertsByTable[shape.substr(path)] >= 2) {
+                    sawMultiInsert = true;
+                }
+            }
+            for (const TBoundParam& param : write.Params) {
+                UNIT_ASSERT(write.Statement.Contains("DECLARE $" + param.Name + " AS "));
+                UNIT_ASSERT(!param.Name.Contains("p0_"));
+            }
+        }
+    }
+    UNIT_ASSERT(sawMultiInsert);
+    UNIT_ASSERT(repeated >= 1);
+}
+
 Y_UNIT_TEST(ReservationKeepsDensePrefix) {
     TVector<TTableRuntime> state(1);
     TVector<TReservation> reserved;

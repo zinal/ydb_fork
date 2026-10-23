@@ -49,9 +49,7 @@ private:
     ui64 Threads = 0;
     ui64 WindowSec = 1;
     TString Seed;
-    TString ClientTimeout = "10s";
-    TString OperationTimeout = "5s";
-    TString CancelAfter = "5s";
+    TString Timeout = "10s";
 };
 
 class TCommandWorkloadReplicationClean : public TYdbCommand {

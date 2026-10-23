@@ -6,7 +6,6 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/query/client.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/table/table.h>
 
-#include <library/cpp/threading/future/future.h>
 #include <util/datetime/base.h>
 
 namespace NYdb::NConsoleClient::NReplicationWorkload {
@@ -15,26 +14,19 @@ TString WorkloadRoot(const TString& database, const TString& path);
 TParams BindParams(const TVector<TBoundParam>& params);
 TParams BindImportRows(const TVector<TVector<TBoundParam>>& rows);
 
-NQuery::TExecuteQuerySettings MakeQuerySettings(
-    const TDuration& clientTimeout,
-    const TDuration& operationTimeout,
-    const TDuration& cancelAfter);
+NQuery::TExecuteQuerySettings MakeQuerySettings(const TDuration& timeout);
 void ExecScheme(NTable::TTableClient& client, const TString& query);
-NThreading::TFuture<TStatus> ExecDataAsync(
-    NQuery::TQueryClient& client,
-    const TString& script,
-    const TParams& params,
-    const TDuration& clientTimeout,
-    const TDuration& operationTimeout,
-    const TDuration& cancelAfter,
-    bool idempotent);
 TStatus ExecData(
     NQuery::TQueryClient& client,
     const TString& script,
     const TParams& params,
-    const TDuration& clientTimeout,
-    const TDuration& operationTimeout,
-    const TDuration& cancelAfter,
+    const TDuration& timeout,
     bool idempotent);
+// Runs every write as its own query inside one interactive serializable transaction.
+// A retry repeats the same statements from the beginning.
+TStatus ExecWrites(
+    NQuery::TQueryClient& client,
+    const TVector<TRowWrite>& writes,
+    const TDuration& timeout);
 
 } // namespace NYdb::NConsoleClient::NReplicationWorkload

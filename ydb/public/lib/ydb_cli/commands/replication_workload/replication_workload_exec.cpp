@@ -211,13 +211,15 @@ TParams BindImportRows(const TVector<TVector<TBoundParam>>& rows) {
     return TParamsBuilder().AddParam("$input", list.Build()).Build();
 }
 
-NQuery::TExecuteQuerySettings MakeQuerySettings(
-    const TDuration& clientTimeout,
-    const TDuration& operationTimeout,
-    const TDuration& cancelAfter)
-{
-    const TDuration bound = std::min(clientTimeout, std::min(operationTimeout, cancelAfter));
-    return NQuery::TExecuteQuerySettings().ClientTimeout(bound);
+NQuery::TExecuteQuerySettings MakeQuerySettings(const TDuration& timeout) {
+    return NQuery::TExecuteQuerySettings().ClientTimeout(timeout);
+}
+
+NQuery::TRetryOperationSettings RetrySettings(const TDuration& timeout, bool idempotent) {
+    return NQuery::TRetryOperationSettings()
+        .Idempotent(idempotent)
+        .MaxRetries(10)
+        .GetSessionClientTimeout(timeout);
 }
 
 void ExecScheme(NTable::TTableClient& client, const TString& query) {
@@ -227,39 +229,58 @@ void ExecScheme(NTable::TTableClient& client, const TString& query) {
     NStatusHelpers::ThrowOnError(result);
 }
 
-NThreading::TFuture<TStatus> ExecDataAsync(
-    NQuery::TQueryClient& client,
-    const TString& script,
-    const TParams& params,
-    const TDuration& clientTimeout,
-    const TDuration& operationTimeout,
-    const TDuration& cancelAfter,
-    bool idempotent)
-{
-    auto settings = MakeQuerySettings(clientTimeout, operationTimeout, cancelAfter);
-    auto retry = NQuery::TRetryOperationSettings().Idempotent(idempotent).MaxRetries(10);
-    return client.RetryQuery([script, params, settings](NQuery::TSession session) {
-        return session.ExecuteQuery(
-            script,
-            NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW()).CommitTx(true),
-            params,
-            settings).Apply([](const NQuery::TAsyncExecuteQueryResult& future) {
-                NQuery::TAsyncExecuteQueryResult copy = future;
-                return TStatus(copy.ExtractValue());
-            });
-    }, retry);
-}
-
 TStatus ExecData(
     NQuery::TQueryClient& client,
     const TString& script,
     const TParams& params,
-    const TDuration& clientTimeout,
-    const TDuration& operationTimeout,
-    const TDuration& cancelAfter,
+    const TDuration& timeout,
     bool idempotent)
 {
-    return ExecDataAsync(client, script, params, clientTimeout, operationTimeout, cancelAfter, idempotent).GetValueSync();
+    const NQuery::TExecuteQuerySettings settings = MakeQuerySettings(timeout);
+    return client.RetryQuerySync([script, params, settings](NQuery::TSession session) {
+        auto result = session.ExecuteQuery(
+            script,
+            NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW()).CommitTx(true),
+            params,
+            settings).GetValueSync();
+        return TStatus(std::move(result));
+    }, RetrySettings(timeout, idempotent));
+}
+
+TStatus ExecWrites(
+    NQuery::TQueryClient& client,
+    const TVector<TRowWrite>& writes,
+    const TDuration& timeout)
+{
+    if (writes.empty()) {
+        return TStatus(EStatus::SUCCESS, NIssue::TIssues());
+    }
+    const NQuery::TExecuteQuerySettings settings = MakeQuerySettings(timeout);
+    const NQuery::TBeginTxSettings beginSettings = NQuery::TBeginTxSettings().ClientTimeout(timeout);
+    const NQuery::TRollbackTxSettings rollbackSettings = NQuery::TRollbackTxSettings().ClientTimeout(timeout);
+    return client.RetryQuerySync([&writes, settings, beginSettings, rollbackSettings](NQuery::TSession session) {
+        auto begin = session.BeginTransaction(NQuery::TTxSettings::SerializableRW(), beginSettings).GetValueSync();
+        if (!begin.IsSuccess()) {
+            return TStatus(std::move(begin));
+        }
+        NQuery::TTransaction tx = begin.GetTransaction();
+        for (size_t i = 0; i < writes.size(); ++i) {
+            auto control = NQuery::TTxControl::Tx(tx);
+            if (i + 1 == writes.size()) {
+                control.CommitTx(true);
+            }
+            auto result = session.ExecuteQuery(
+                std::string(writes[i].Statement),
+                control,
+                BindParams(writes[i].Params),
+                settings).GetValueSync();
+            if (!result.IsSuccess()) {
+                tx.Rollback(rollbackSettings).GetValueSync();
+                return TStatus(std::move(result));
+            }
+        }
+        return TStatus(EStatus::SUCCESS, NIssue::TIssues());
+    }, RetrySettings(timeout, true));
 }
 
 } // namespace NYdb::NConsoleClient::NReplicationWorkload

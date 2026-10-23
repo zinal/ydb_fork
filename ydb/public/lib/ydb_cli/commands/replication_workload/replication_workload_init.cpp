@@ -160,8 +160,6 @@ int TCommandWorkloadReplicationImport::Run(TConfig& config) {
                         queries[index],
                         BindImportRows(rows),
                         timeout,
-                        timeout,
-                        timeout,
                         true);
                     if (!status.IsSuccess()) {
                         fail(TStringBuilder() << "table " << fullNames[index]

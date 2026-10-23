@@ -74,7 +74,7 @@ i64 LoadBoundary(
     auto result = client.ExecuteQuery(
         query,
         ReadOnlyTx(),
-        MakeQuerySettings(timeout, timeout, timeout)).GetValueSync();
+        MakeQuerySettings(timeout)).GetValueSync();
     EnsureQuery(result, query);
     TResultSetParser parser(result.GetResultSet(0));
     if (!parser.TryNextRow()) {
@@ -97,7 +97,7 @@ void LoadSeqnoHashes(
     auto result = client.ExecuteQuery(
         query,
         ReadOnlyTx(),
-        MakeQuerySettings(timeout, timeout, timeout)).GetValueSync();
+        MakeQuerySettings(timeout)).GetValueSync();
     EnsureQuery(result, query);
     TResultSetParser parser(result.GetResultSet(0));
     while (parser.TryNextRow()) {
@@ -122,14 +122,6 @@ struct TEventLater {
     }
 };
 
-TVector<TBoundParam> Flatten(const TVector<TRowWrite>& writes) {
-    TVector<TBoundParam> params;
-    for (const TRowWrite& write : writes) {
-        params.insert(params.end(), write.Params.begin(), write.Params.end());
-    }
-    return params;
-}
-
 class TRunner {
 public:
     TRunner(
@@ -138,9 +130,7 @@ public:
         ui64 users,
         ui64 maxRecords,
         TDuration pause,
-        TDuration clientTimeout,
-        TDuration operationTimeout,
-        TDuration cancelAfter,
+        TDuration timeout,
         ui64 seed,
         bool verbose)
         : Client(client)
@@ -148,12 +138,11 @@ public:
         , Users(users)
         , MaxRecords(maxRecords)
         , Pause(pause)
-        , ClientTimeout(clientTimeout)
-        , OperationTimeout(operationTimeout)
-        , CancelAfter(cancelAfter)
+        , Timeout(timeout)
         , Verbose(verbose)
         , Tables(AllTables())
         , State(Tables.size())
+        , Workers(users)
     {
         Rng.reserve(users);
         for (ui64 i = 0; i < users; ++i) {
@@ -296,34 +285,46 @@ private:
             return;
         }
         auto shared = std::make_shared<TTxPlan>(std::move(plan));
-        const TString script = BuildScript(shared->Writes);
-        const TParams params = BindParams(Flatten(shared->Writes));
         {
             std::lock_guard lock(Mutex);
             ++InFlight;
         }
-        ExecDataAsync(Client, script, params, ClientTimeout, OperationTimeout, CancelAfter, true)
-            .Subscribe([this, user, shared](const NThreading::TFuture<TStatus>& future) {
-                TStatus status = future.GetValue();
-                TEvent event;
+        // The scheduler must stay free to start other users. RetryQuerySync blocks
+        // its caller, so each transaction runs on its own thread and is joined in OnFinish.
+        Workers[user] = std::thread([this, user, shared] {
+            TEvent event;
+            event.Finish = true;
+            event.User = user;
+            event.Plan = shared;
+            try {
+                const TStatus status = ExecWrites(Client, shared->Writes, Timeout);
                 event.When = TInstant::Now();
-                event.Finish = true;
-                event.User = user;
                 event.Success = status.IsSuccess();
-                event.Plan = shared;
                 if (!status.IsSuccess()) {
                     event.Error = TStringBuilder() << "error status=" << status.GetStatus()
                         << " issues=" << status.GetIssues().ToString();
                 }
-                {
-                    std::lock_guard lock(Mutex);
-                    Queue.push(std::move(event));
-                }
-                Cond.notify_all();
-            });
+            } catch (const std::exception& ex) {
+                event.When = TInstant::Now();
+                event.Success = false;
+                event.Error = TStringBuilder() << "error status=CLIENT_INTERNAL_ERROR issues=" << ex.what();
+            } catch (...) {
+                event.When = TInstant::Now();
+                event.Success = false;
+                event.Error = "error status=CLIENT_INTERNAL_ERROR issues=unknown";
+            }
+            {
+                std::lock_guard lock(Mutex);
+                Queue.push(std::move(event));
+            }
+            Cond.notify_all();
+        });
     }
 
     void OnFinish(const TEvent& event) {
+        if (Workers[event.User].joinable()) {
+            Workers[event.User].join();
+        }
         ApplyReservations(State, event.Plan->Reservations, event.Success);
         if (event.Success) {
             const ui64 hash = HashSeqno(event.Plan->Seqno);
@@ -375,9 +376,7 @@ private:
     const ui64 Users = 1;
     const ui64 MaxRecords = 1;
     const TDuration Pause;
-    const TDuration ClientTimeout;
-    const TDuration OperationTimeout;
-    const TDuration CancelAfter;
+    const TDuration Timeout;
     const bool Verbose = false;
     const TVector<TTable> Tables;
     TVector<TTableRuntime> State;
@@ -395,6 +394,7 @@ private:
     std::condition_variable Cond;
     std::priority_queue<TEvent, std::vector<TEvent>, TEventLater> Queue;
     std::thread Thread;
+    TVector<std::thread> Workers;
 };
 
 } // namespace
@@ -421,12 +421,8 @@ void TCommandWorkloadReplicationRun::Config(TConfig& config) {
         .DefaultValue(WindowSec).StoreResult(&WindowSec);
     config.Opts->AddLongOption("seed", "Random generator seed. Without this option the seed is the current time")
         .StoreResult(&Seed);
-    config.Opts->AddLongOption("client-timeout", "Transport timeout. A plain number is milliseconds")
-        .DefaultValue(ClientTimeout).StoreResult(&ClientTimeout);
-    config.Opts->AddLongOption("operation-timeout", "Operation timeout. A plain number is milliseconds")
-        .DefaultValue(OperationTimeout).StoreResult(&OperationTimeout);
-    config.Opts->AddLongOption("cancel-after", "Operation cancel timeout. A plain number is milliseconds")
-        .DefaultValue(CancelAfter).StoreResult(&CancelAfter);
+    config.Opts->AddLongOption("timeout", "Timeout of each request. A plain number is milliseconds")
+        .DefaultValue(Timeout).StoreResult(&Timeout);
 }
 
 int TCommandWorkloadReplicationRun::Run(TConfig& config) {
@@ -440,9 +436,7 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
         throw TMisuseException() << "Window must be positive";
     }
     const TDuration pause = ParseDurationMilliseconds(Pause);
-    const TDuration clientTimeout = ParseDurationMilliseconds(ClientTimeout);
-    const TDuration operationTimeout = ParseDurationMilliseconds(OperationTimeout);
-    const TDuration cancelAfter = ParseDurationMilliseconds(CancelAfter);
+    const TDuration timeout = ParseDurationMilliseconds(Timeout);
     const ui64 seed = Seed.empty() ? TInstant::Now().MicroSeconds() : FromString<ui64>(Seed);
 
     auto driverConfig = config.CreateDriverConfig();
@@ -455,8 +449,8 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
     NQuery::TQueryClient client(driver, clientSettings);
 
     PrepareTpchText();
-    TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, clientTimeout, operationTimeout, cancelAfter, seed, config.IsVerbose());
-    runner.Load(clientTimeout);
+    TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, timeout, seed, config.IsVerbose());
+    runner.Load(timeout);
     runner.SetSeqno(static_cast<ui64>(TInstant::Now().MicroSeconds()));
 
     const TInstant start = TInstant::Now();

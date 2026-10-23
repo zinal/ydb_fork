@@ -509,6 +509,22 @@ TVector<size_t> ValueColumnsExceptSeqno(const TTable& table) {
     return indexes;
 }
 
+// One statement plus its own declarations. Parameter names are column names,
+// so every insert into a table shares one text and an update text depends
+// only on the assigned columns.
+TString QueryText(const TString& statement, const TVector<TBoundParam>& params) {
+    TStringBuilder sql;
+    for (const TBoundParam& param : params) {
+        sql << "DECLARE $" << param.Name << " AS " << param.SqlType;
+        if (param.Optional) {
+            sql << "?";
+        }
+        sql << ";\n";
+    }
+    sql << statement;
+    return sql;
+}
+
 } // namespace
 
 TString SqlType(EColType type) {
@@ -925,14 +941,10 @@ TRowWrite MakeInsertWrite(
     const TString& fullName,
     ui64 n,
     ui64 seqno,
-    const TString& prefix,
     std::mt19937_64& rng)
 {
     TRowWrite write;
     TVector<TBoundParam> params = MakeRowParams(table, n, seqno, rng);
-    for (TBoundParam& param : params) {
-        param.Name = prefix + param.Name;
-    }
     TStringBuilder sql;
     sql << "UPSERT INTO " << QuotePath(fullName) << " (" << ColumnList(table.Columns) << ") VALUES (";
     for (size_t i = 0; i < params.size(); ++i) {
@@ -942,25 +954,9 @@ TRowWrite MakeInsertWrite(
         sql << "$" << params[i].Name;
     }
     sql << ");";
-    write.Statement = sql;
+    write.Statement = QueryText(sql, params);
     write.Params = std::move(params);
     return write;
-}
-
-TString BuildScript(const TVector<TRowWrite>& writes) {
-    TStringBuilder declares;
-    TStringBuilder body;
-    for (const TRowWrite& write : writes) {
-        for (const TBoundParam& param : write.Params) {
-            declares << "DECLARE $" << param.Name << " AS " << param.SqlType;
-            if (param.Optional) {
-                declares << "?";
-            }
-            declares << ";\n";
-        }
-        body << write.Statement << "\n";
-    }
-    return TString(declares) + body;
 }
 
 bool TryReserve(TVector<TTableRuntime>& state, const TVector<std::pair<size_t, ui64>>& inserts, TVector<TReservation>& out) {
@@ -1057,10 +1053,6 @@ TTxPlan BuildTransaction(
         plan.InsertTables.push_back(reservation.TableIndex);
     }
 
-    ui64 paramId = 0;
-    auto nextPrefix = [&]() {
-        return TStringBuilder() << "p" << paramId++ << "_";
-    };
     for (const TTableWork& item : work) {
         const TTable& table = tables[item.Index];
         const TString fullName = JoinPath(pathPrefix, table.Name);
@@ -1073,11 +1065,9 @@ TTxPlan BuildTransaction(
         }
         for (ui64 row = 0; row < item.Inserts; ++row) {
             const ui64 n = reservation->First + row;
-            const TString prefix = nextPrefix();
-            plan.Writes.push_back(MakeInsertWrite(table, fullName, n, seqno, prefix, rng));
+            plan.Writes.push_back(MakeInsertWrite(table, fullName, n, seqno, rng));
         }
         for (ui64 number : item.UpdateNumbers) {
-            const TString prefix = nextPrefix();
             TRowWrite write;
             write.Update = true;
             const int columnCount = std::uniform_int_distribution<int>(1, 3)(rng);
@@ -1094,6 +1084,10 @@ TTxPlan BuildTransaction(
             for (int i = 0; i < extras; ++i) {
                 chosen.push_back(&table.Columns[eligible[i]]);
             }
+            // Name order makes one column set produce one statement text.
+            std::sort(chosen.begin(), chosen.end(), [](const TColumn* left, const TColumn* right) {
+                return left->Name < right->Name;
+            });
             TStringBuilder sql;
             sql << "UPDATE " << QuotePath(fullName) << " SET ";
             TVector<TBoundParam> params;
@@ -1103,13 +1097,13 @@ TTxPlan BuildTransaction(
                 }
                 TBoundParam value;
                 if (chosen[i]->Name == "seqno") {
-                    value.Name = prefix + "seqno";
+                    value.Name = "seqno";
                     value.SqlType = "Uint64";
                     value.Kind = EParamKind::Uint64;
                     value.U = seqno;
                 } else {
                     value = MakeValue(*chosen[i], rng);
-                    value.Name = prefix + chosen[i]->Name;
+                    value.Name = chosen[i]->Name;
                     value.Optional = true;
                 }
                 sql << chosen[i]->Name << " = $" << value.Name;
@@ -1123,7 +1117,7 @@ TTxPlan BuildTransaction(
                     seqnoHash = *found;
                 }
             }
-            TVector<TBoundParam> keys = MakeKeyParams(table, number, seqnoHash, prefix);
+            TVector<TBoundParam> keys = MakeKeyParams(table, number, seqnoHash, "");
             size_t keyIndex = 0;
             for (const TColumn& column : table.Columns) {
                 if (!column.Key) {
@@ -1137,7 +1131,7 @@ TTxPlan BuildTransaction(
                 ++keyIndex;
             }
             sql << ";";
-            write.Statement = sql;
+            write.Statement = QueryText(sql, params);
             write.Params = std::move(params);
             plan.Writes.push_back(std::move(write));
         }
