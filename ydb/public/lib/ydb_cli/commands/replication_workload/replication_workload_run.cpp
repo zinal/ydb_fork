@@ -1,0 +1,479 @@
+#include "replication_workload.h"
+#include "replication_workload_exec.h"
+#include "replication_workload_text.h"
+
+#include <ydb/public/lib/ydb_cli/common/duration.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/driver/driver.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/query/client.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/result/result.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/status/status.h>
+#include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/value/value.h>
+
+#include <util/generic/hash_set.h>
+#include <util/generic/yexception.h>
+#include <util/string/printf.h>
+#include <util/string/cast.h>
+#include <util/system/thread.h>
+
+#include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
+#include <queue>
+#include <thread>
+
+namespace NYdb::NConsoleClient {
+namespace {
+
+using namespace NReplicationWorkload;
+
+TString OneDecimal(double value) {
+    return Sprintf("%.1f", value);
+}
+
+void PrintStats(double elapsedSec, double windowSec, ui64 tx, ui64 errors) {
+    const double txRate = windowSec > 0 ? static_cast<double>(tx) / windowSec : 0;
+    const double errorRate = windowSec > 0 ? static_cast<double>(errors) / windowSec : 0;
+    Cout << "elapsed_s=" << OneDecimal(elapsedSec)
+        << " tx_per_s=" << OneDecimal(txRate)
+        << " errors_per_s=" << OneDecimal(errorRate)
+        << " tx=" << tx
+        << " errors=" << errors
+        << Endl;
+}
+
+NQuery::TTxControl ReadOnlyTx() {
+    return NQuery::TTxControl::BeginTx(NQuery::TTxSettings::OnlineRO()).CommitTx(true);
+}
+
+TDuration ScanTimeout(const TDuration& clientTimeout) {
+    const TDuration floor = TDuration::Minutes(10);
+    return clientTimeout > floor ? clientTimeout : floor;
+}
+
+void EnsureQuery(const TStatus& status, const TString& query) {
+    if (!status.IsSuccess()) {
+        ythrow yexception() << query
+            << " status=" << status.GetStatus()
+            << " issues=" << status.GetIssues().ToString();
+    }
+}
+
+i64 LoadBoundary(
+    NQuery::TQueryClient& client,
+    const TTable& table,
+    const TString& fullName,
+    const TDuration& timeout)
+{
+    TString query;
+    if (table.Composite) {
+        query = "SELECT seq AS pk FROM " + QuotePath(fullName) + " ORDER BY seq DESC LIMIT 1;";
+    } else {
+        query = "SELECT COUNT(*) AS pk FROM " + QuotePath(fullName) + ";";
+    }
+    auto result = client.ExecuteQuery(
+        query,
+        ReadOnlyTx(),
+        MakeQuerySettings(timeout)).GetValueSync();
+    EnsureQuery(result, query);
+    TResultSetParser parser(result.GetResultSet(0));
+    if (!parser.TryNextRow()) {
+        return -1;
+    }
+    const ui64 value = parser.ColumnParser("pk").GetUint64();
+    if (!table.Composite) {
+        return value == 0 ? -1 : static_cast<i64>(value - 1);
+    }
+    return static_cast<i64>(value);
+}
+
+void LoadSeqnoHashes(
+    NQuery::TQueryClient& client,
+    const TString& fullName,
+    const TDuration& timeout,
+    THashMap<ui64, ui64>& hashes)
+{
+    const TString query = "SELECT seq, seqno_hash FROM " + QuotePath(fullName) + ";";
+    auto result = client.ExecuteQuery(
+        query,
+        ReadOnlyTx(),
+        MakeQuerySettings(timeout)).GetValueSync();
+    EnsureQuery(result, query);
+    TResultSetParser parser(result.GetResultSet(0));
+    while (parser.TryNextRow()) {
+        const ui64 seq = parser.ColumnParser("seq").GetUint64();
+        const ui64 hash = parser.ColumnParser("seqno_hash").GetUint64();
+        hashes[seq] = hash;
+    }
+}
+
+struct TEvent {
+    TInstant When;
+    bool Finish = false;
+    size_t User = 0;
+    bool Success = false;
+    TString Error;
+    std::shared_ptr<TTxPlan> Plan;
+};
+
+struct TEventLater {
+    bool operator()(const TEvent& left, const TEvent& right) const {
+        return left.When > right.When;
+    }
+};
+
+class TRunner {
+public:
+    TRunner(
+        NQuery::TQueryClient& client,
+        TString root,
+        ui64 users,
+        ui64 maxRecords,
+        TDuration pause,
+        TDuration timeout,
+        ui64 seed,
+        bool verbose)
+        : Client(client)
+        , Root(std::move(root))
+        , Users(users)
+        , MaxRecords(maxRecords)
+        , Pause(pause)
+        , Timeout(timeout)
+        , Verbose(verbose)
+        , Tables(AllTables())
+        , State(Tables.size())
+        , Workers(users)
+    {
+        Rng.reserve(users);
+        for (ui64 i = 0; i < users; ++i) {
+            Rng.emplace_back(seed + i);
+        }
+    }
+
+    void Load(const TDuration& clientTimeout) {
+        const TDuration timeout = ScanTimeout(clientTimeout);
+        std::atomic<size_t> next{0};
+        std::mutex errorMutex;
+        TString errorText;
+        std::atomic<bool> failed{false};
+        auto fail = [&](const TString& text) {
+            std::lock_guard<std::mutex> lock(errorMutex);
+            if (errorText.empty()) {
+                errorText = text;
+            }
+            failed.store(true);
+        };
+        auto worker = [&]() {
+            while (!failed.load()) {
+                const size_t index = next.fetch_add(1);
+                if (index >= Tables.size()) {
+                    return;
+                }
+                const TString fullName = JoinPath(Root, Tables[index].Name);
+                try {
+                    State[index].Boundary = LoadBoundary(Client, Tables[index], fullName, timeout);
+                    if (Tables[index].SeqnoHashPrefix) {
+                        LoadSeqnoHashes(Client, fullName, timeout, State[index].SeqnoHashByRow);
+                    }
+                } catch (const std::exception& ex) {
+                    fail(ex.what());
+                } catch (...) {
+                    fail(TStringBuilder() << "boundary read failed for " << fullName);
+                }
+            }
+        };
+        const ui64 workerCount = std::min<ui64>(8, std::min<ui64>(Users + 4, Tables.size()));
+        TVector<std::thread> pool;
+        pool.reserve(workerCount);
+        for (ui64 i = 0; i < workerCount; ++i) {
+            pool.emplace_back(worker);
+        }
+        for (std::thread& thread : pool) {
+            thread.join();
+        }
+        if (failed.load()) {
+            ythrow yexception() << errorText;
+        }
+    }
+
+    void SetSeqno(ui64 seqno) {
+        NextSeqno.store(seqno);
+    }
+
+    void RunUntil(TInstant stop) {
+        StopAt = stop;
+        for (size_t user = 0; user < Users; ++user) {
+            Queue.push(TEvent{TInstant::Now(), false, user, false, {}, nullptr});
+        }
+        Thread = std::thread([this] { Loop(); });
+        Thread.join();
+    }
+
+    void Stop() {
+        {
+            std::lock_guard lock(Mutex);
+        Stopping.store(true);
+        }
+        Cond.notify_all();
+    }
+
+    ui64 Success() const {
+        return SuccessCount.load();
+    }
+
+    ui64 Errors() const {
+        return ErrorCount.load();
+    }
+
+    ui64 WindowSuccess() {
+        return WindowSuccessCount.exchange(0);
+    }
+
+    ui64 WindowErrors() {
+        return WindowErrorCount.exchange(0);
+    }
+
+private:
+    void Loop() {
+        while (true) {
+            TEvent event;
+            {
+                std::unique_lock lock(Mutex);
+                auto ready = [&] {
+                    if (Stopping.load() && InFlight == 0) {
+                        return true;
+                    }
+                    return !Queue.empty() && Queue.top().When <= TInstant::Now();
+                };
+                if (Queue.empty()) {
+                    Cond.wait(lock, ready);
+                } else {
+                    const TDuration delay = Queue.top().When - TInstant::Now();
+                    if (delay > TDuration::Zero()) {
+                        Cond.wait_for(lock, std::chrono::microseconds(delay.MicroSeconds()), ready);
+                    }
+                }
+                if (Stopping.load() && InFlight == 0) {
+                    return;
+                }
+                event = Queue.top();
+                Queue.pop();
+            }
+            if (!event.Finish && (Stopping.load() || TInstant::Now() >= StopAt)) {
+                continue;
+            }
+            if (event.Finish) {
+                OnFinish(event);
+            } else {
+                OnStart(event.User);
+            }
+        }
+    }
+
+    void OnStart(size_t user) {
+        if (Waiting.count(user)) {
+            return;
+        }
+        TTxPlan plan = BuildTransaction(Tables, State, Root, NextSeqno.fetch_add(1), MaxRecords, Rng[user]);
+        if (plan.Busy) {
+            NextSeqno.fetch_sub(1);
+            Waiting.insert(user);
+            return;
+        }
+        if (plan.Writes.empty()) {
+            Schedule(user, Pause);
+            return;
+        }
+        auto shared = std::make_shared<TTxPlan>(std::move(plan));
+        {
+            std::lock_guard lock(Mutex);
+            ++InFlight;
+        }
+        // The scheduler must stay free to start other users. RetryQuerySync blocks
+        // its caller, so each transaction runs on its own thread and is joined in OnFinish.
+        Workers[user] = std::thread([this, user, shared] {
+            TEvent event;
+            event.Finish = true;
+            event.User = user;
+            event.Plan = shared;
+            try {
+                const TStatus status = ExecWrites(Client, shared->Writes, Timeout);
+                event.When = TInstant::Now();
+                event.Success = status.IsSuccess();
+                if (!status.IsSuccess()) {
+                    event.Error = TStringBuilder() << "error status=" << status.GetStatus()
+                        << " issues=" << status.GetIssues().ToString();
+                }
+            } catch (const std::exception& ex) {
+                event.When = TInstant::Now();
+                event.Success = false;
+                event.Error = TStringBuilder() << "error status=CLIENT_INTERNAL_ERROR issues=" << ex.what();
+            } catch (...) {
+                event.When = TInstant::Now();
+                event.Success = false;
+                event.Error = "error status=CLIENT_INTERNAL_ERROR issues=unknown";
+            }
+            {
+                std::lock_guard lock(Mutex);
+                Queue.push(std::move(event));
+            }
+            Cond.notify_all();
+        });
+    }
+
+    void OnFinish(const TEvent& event) {
+        if (Workers[event.User].joinable()) {
+            Workers[event.User].join();
+        }
+        ApplyReservations(State, event.Plan->Reservations, event.Success);
+        if (event.Success) {
+            const ui64 hash = HashSeqno(event.Plan->Seqno);
+            for (const TReservation& reservation : event.Plan->Reservations) {
+                if (!Tables[reservation.TableIndex].SeqnoHashPrefix) {
+                    continue;
+                }
+                for (ui64 row = 0; row < reservation.Count; ++row) {
+                    State[reservation.TableIndex].SeqnoHashByRow[reservation.First + row] = hash;
+                }
+            }
+            SuccessCount.fetch_add(1);
+            WindowSuccessCount.fetch_add(1);
+        } else {
+            ErrorCount.fetch_add(1);
+            WindowErrorCount.fetch_add(1);
+            if (Verbose && !event.Error.empty()) {
+                Cerr << event.Error << Endl;
+            }
+        }
+        {
+            std::lock_guard lock(Mutex);
+            --InFlight;
+        }
+        WakeWaiting();
+        if (!Stopping.load() && TInstant::Now() < StopAt) {
+            Schedule(event.User, Pause);
+        } else {
+            Cond.notify_all();
+        }
+    }
+
+    void WakeWaiting() {
+        TVector<size_t> pending(Waiting.begin(), Waiting.end());
+        Waiting.clear();
+        for (size_t user : pending) {
+            OnStart(user);
+        }
+    }
+
+    void Schedule(size_t user, TDuration delay) {
+        std::lock_guard lock(Mutex);
+        Queue.push(TEvent{TInstant::Now() + delay, false, user, false, {}, nullptr});
+        Cond.notify_all();
+    }
+
+    NQuery::TQueryClient& Client;
+    const TString Root;
+    const ui64 Users = 1;
+    const ui64 MaxRecords = 1;
+    const TDuration Pause;
+    const TDuration Timeout;
+    const bool Verbose = false;
+    const TVector<TTable> Tables;
+    TVector<TTableRuntime> State;
+    TVector<std::mt19937_64> Rng;
+    std::atomic<ui64> NextSeqno{0};
+    std::atomic<ui64> SuccessCount{0};
+    std::atomic<ui64> ErrorCount{0};
+    std::atomic<ui64> WindowSuccessCount{0};
+    std::atomic<ui64> WindowErrorCount{0};
+    TInstant StopAt;
+    std::atomic<bool> Stopping{false};
+    int InFlight = 0;
+    THashSet<size_t> Waiting;
+    std::mutex Mutex;
+    std::condition_variable Cond;
+    std::priority_queue<TEvent, std::vector<TEvent>, TEventLater> Queue;
+    std::thread Thread;
+    TVector<std::thread> Workers;
+};
+
+} // namespace
+
+TCommandWorkloadReplicationRun::TCommandWorkloadReplicationRun()
+    : TYdbCommand("run", {}, "Run idempotent multi-table write transactions")
+{}
+
+void TCommandWorkloadReplicationRun::Config(TConfig& config) {
+    TYdbCommand::Config(config);
+    config.Opts->AddLongOption("path", "Directory of workload tables in the source database")
+        .DefaultValue(Path).StoreResult(&Path);
+    config.Opts->AddLongOption('s', "seconds", "Write duration, seconds")
+        .DefaultValue(Seconds).StoreResult(&Seconds);
+    config.Opts->AddLongOption("users", "Number of parallel users")
+        .DefaultValue(Users).StoreResult(&Users);
+    config.Opts->AddLongOption("max-records", "Upper bound on rows written into one table inside a transaction. The actual count is random from 1 to this value")
+        .DefaultValue(MaxRecords).StoreResult(&MaxRecords);
+    config.Opts->AddLongOption("pause", "Per-user pause between transactions. A plain number is milliseconds")
+        .DefaultValue(Pause).StoreResult(&Pause);
+    config.Opts->AddLongOption("threads", "Client pool threads. 0 selects the adaptive pool")
+        .DefaultValue(Threads).StoreResult(&Threads);
+    config.Opts->AddLongOption("window", "Rate output window, seconds")
+        .DefaultValue(WindowSec).StoreResult(&WindowSec);
+    config.Opts->AddLongOption("seed", "Random generator seed. Without this option the seed is the current time")
+        .StoreResult(&Seed);
+    config.Opts->AddLongOption("timeout", "Timeout of each request. A plain number is milliseconds")
+        .DefaultValue(Timeout).StoreResult(&Timeout);
+}
+
+int TCommandWorkloadReplicationRun::Run(TConfig& config) {
+    if (Users == 0) {
+        throw TMisuseException() << "Number of users must be positive";
+    }
+    if (MaxRecords == 0) {
+        throw TMisuseException() << "Maximum records must be positive";
+    }
+    if (WindowSec == 0) {
+        throw TMisuseException() << "Window must be positive";
+    }
+    const TDuration pause = ParseDurationMilliseconds(Pause);
+    const TDuration timeout = ParseDurationMilliseconds(Timeout);
+    const ui64 seed = Seed.empty() ? TInstant::Now().MicroSeconds() : FromString<ui64>(Seed);
+
+    auto driverConfig = config.CreateDriverConfig();
+    if (Threads > 0) {
+        driverConfig.SetClientThreadsNum(Threads);
+    }
+    TDriver driver(driverConfig);
+    auto clientSettings = NQuery::TClientSettings().SessionPoolSettings(
+        NQuery::TSessionPoolSettings().MaxActiveSessions(Users + 4));
+    NQuery::TQueryClient client(driver, clientSettings);
+
+    PrepareTpchText();
+    TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, timeout, seed, config.IsVerbose());
+    runner.Load(timeout);
+    runner.SetSeqno(static_cast<ui64>(TInstant::Now().MicroSeconds()));
+
+    const TInstant start = TInstant::Now();
+    const TInstant stop = start + TDuration::Seconds(Seconds);
+    std::thread worker([&runner, stop] { runner.RunUntil(stop); });
+    TInstant next = start + TDuration::Seconds(WindowSec);
+    while (TInstant::Now() < stop) {
+        const TInstant now = TInstant::Now();
+        const TInstant wake = std::min(next, stop);
+        if (wake > now) {
+            Sleep(wake - now);
+        }
+        if (TInstant::Now() >= next) {
+            const double elapsed = static_cast<double>((TInstant::Now() - start).MicroSeconds()) / 1000000.0;
+            PrintStats(elapsed, static_cast<double>(WindowSec), runner.WindowSuccess(), runner.WindowErrors());
+            next += TDuration::Seconds(WindowSec);
+        }
+    }
+    runner.Stop();
+    worker.join();
+    const double elapsed = static_cast<double>((TInstant::Now() - start).MicroSeconds()) / 1000000.0;
+    PrintStats(elapsed, elapsed, runner.Success(), runner.Errors());
+    return EXIT_SUCCESS;
+}
+
+} // namespace NYdb::NConsoleClient
