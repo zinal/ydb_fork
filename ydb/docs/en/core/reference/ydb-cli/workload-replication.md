@@ -28,7 +28,7 @@ The `--path` directory should contain only tables of this workload. Directory re
 
 ## Table schema {#schema}
 
-Every table is row-oriented. Tables are created in the `--path` directory (default `replication`). Secondary indexes and partitioning settings are described below.
+Every table is row-oriented. Tables are created in the `--path` directory (default `replication`). Secondary indexes, compression, and partitioning settings are described below.
 
 Primary key columns and `seqno` are declared `NOT NULL`. The other columns allow `NULL`. On insert, in both `import` and `run`, one randomly chosen value field other than `seqno` is written as `NULL` with probability 10%. In an `UPDATE`, one of the assigned values other than `seqno` is written as `NULL` with probability 1%. When the `UPDATE` assigns only `seqno`, no empty value is written.
 
@@ -237,7 +237,15 @@ The narrow class for `String` and `Utf8` includes the empty value.
 
 The directory holds 28 tables: 23 ordinary tables and 5 wide tables.
 
-## Indexes and partitioning {#indexes}
+## Indexes, compression, and partitioning {#indexes}
+
+Every created table enables lz4 compression for the `default` column family. All columns of the table belong to this family:
+
+```yql
+FAMILY default (COMPRESSION='lz4')
+```
+
+A secondary index copies the table's `default` family, so its data is compressed with lz4 as well.
 
 Every table gets a synchronous secondary index `seqno_idx` on `seqno`:
 
