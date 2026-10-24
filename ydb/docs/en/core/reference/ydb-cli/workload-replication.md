@@ -374,9 +374,7 @@ Once per `--window` seconds (once per second by default) one line is printed to 
 elapsed_s=<seconds> tx_per_s=<rate> errors_per_s=<rate> tx=<count> errors=<count>
 ```
 
-`tx` and `errors` are counters for that window. Rates are those counters divided by the window length, with one digit after the decimal point.
-
-`tx` counts statements of transactions that committed successfully. Each statement is its own query, and the server accounts those queries as separate transactions, so `tx_per_s` matches the transaction intensity in monitoring. One multi-statement transaction adds its statement count to `tx`. `errors` counts failed transactions as a whole.
+`tx` and `errors` are counters for that window. Rates are those counters divided by the window length, with one digit after the decimal point. `tx` counts committed transactions: one multi-statement transaction counts as one, however many statements it contains.
 
 After shutdown, a total for the whole run is printed in the same form: `tx` and `errors` are cumulative, and rates are computed over the full duration.
 
