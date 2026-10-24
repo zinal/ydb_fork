@@ -257,33 +257,33 @@ TStatus ExecWrites(
         return TStatus(EStatus::SUCCESS, NIssue::TIssues());
     }
     const NQuery::TExecuteQuerySettings settings = MakeQuerySettings(timeout);
-    const NQuery::TCommitTxSettings commitSettings = NQuery::TCommitTxSettings().ClientTimeout(timeout);
-    // Same shape as an interactive TPC-C transaction: RetryQuerySync owns the retries,
-    // the callback runs one attempt and returns its status.
-    return client.RetryQuerySync([&writes, settings, commitSettings](NQuery::TSession session) {
+    // RetryQuerySync owns the retries. One attempt returns the status of its
+    // statement or of the commit attached to the last statement.
+    return client.RetryQuerySync([&writes, settings](NQuery::TSession session) {
         std::optional<NQuery::TTransaction> tx;
-        for (const TRowWrite& write : writes) {
-            const auto control = tx
+        for (size_t i = 0; i < writes.size(); ++i) {
+            const bool last = i + 1 == writes.size();
+            auto control = tx
                 ? NQuery::TTxControl::Tx(*tx)
                 : NQuery::TTxControl::BeginTx(NQuery::TTxSettings::SerializableRW());
+            if (last) {
+                control.CommitTx(true);
+            }
             auto result = session.ExecuteQuery(
-                std::string(write.Statement),
+                std::string(writes[i].Statement),
                 control,
-                BindParams(write.Params),
+                BindParams(writes[i].Params),
                 settings).GetValueSync();
-            if (!result.IsSuccess()) {
+            if (!result.IsSuccess() || last) {
                 return TStatus(std::move(result));
             }
-            if (!tx) {
-                auto started = result.GetTransaction();
-                if (!started) {
-                    return TStatus(EStatus::CLIENT_INTERNAL_ERROR, NIssue::TIssues());
-                }
-                tx = std::move(*started);
+            auto started = result.GetTransaction();
+            if (!started) {
+                return TStatus(EStatus::CLIENT_INTERNAL_ERROR, NIssue::TIssues());
             }
+            tx = std::move(*started);
         }
-        auto commit = tx->Commit(commitSettings).GetValueSync();
-        return TStatus(std::move(commit));
+        return TStatus(EStatus::SUCCESS, NIssue::TIssues());
     }, RetrySettings(timeout, true));
 }
 
