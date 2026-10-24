@@ -336,8 +336,11 @@ private:
                     State[reservation.TableIndex].SeqnoHashByRow[reservation.First + row] = hash;
                 }
             }
-            SuccessCount.fetch_add(1);
-            WindowSuccessCount.fetch_add(1);
+            // Each statement is its own query. YDB accounts those queries as separate
+            // transactions, so the printed rate follows that intensity.
+            const ui64 statements = event.Plan->Writes.size();
+            SuccessCount.fetch_add(statements);
+            WindowSuccessCount.fetch_add(statements);
         } else {
             ErrorCount.fetch_add(1);
             WindowErrorCount.fetch_add(1);
