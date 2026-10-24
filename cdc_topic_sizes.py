@@ -5,6 +5,7 @@ Connection string, either form:
 
     export YDB_CONNECTION_STRING='grpcs://localhost:2135/Root/source'
     export YDB_CONNECTION_STRING='grpcs://localhost:2135/?database=/Root/source'
+    export YDB_SSL_ROOT_CERTIFICATES_FILE=/path/to/ca.pem
 
     python3 cdc_topic_sizes.py > cdc_sizes.csv
 
@@ -111,11 +112,36 @@ def make_credentials():
     return None
 
 
+def load_root_certificates():
+    """PEM bytes for DriverConfig.root_certificates.
+
+    The SDK does not apply YDB_SSL_ROOT_CERTIFICATES_FILE on its own. Without
+    these bytes gRPC trusts only the default public roots and rejects a
+    private CA.
+    """
+    path = os.getenv("YDB_SSL_ROOT_CERTIFICATES_FILE")
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as certificate_file:
+            data = certificate_file.read()
+    except OSError as exc:
+        raise RuntimeError(
+            "cannot read YDB_SSL_ROOT_CERTIFICATES_FILE %s: %s" % (path, exc)
+        ) from exc
+    if not data:
+        raise RuntimeError("YDB_SSL_ROOT_CERTIFICATES_FILE is empty: %s" % path)
+    return data
+
+
 def make_driver(args):
     credentials = make_credentials()
     kwargs = {}
     if credentials is not None:
         kwargs["credentials"] = credentials
+    root_certificates = load_root_certificates()
+    if root_certificates is not None:
+        kwargs["root_certificates"] = root_certificates
 
     if args.connection_string:
         endpoint, database = parse_connection_string(args.connection_string)
