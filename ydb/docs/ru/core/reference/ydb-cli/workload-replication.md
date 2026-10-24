@@ -433,7 +433,7 @@ error status=<код статуса> issues=<текст сообщений>
 {{ ydb-cli }} workload replication import --path replication --rows 1000
 ```
 
-Затем в базе-приёмнике пользователь создаёт экземпляр репликации. Полный текст запроса приведён [ниже](#create-replication). Команда нагрузки этот запрос не выполняет.
+Затем в базе-приёмнике пользователь создаёт экземпляр репликации. Краткий пример запроса приведён [ниже](#create-replication). Команда нагрузки этот запрос не выполняет.
 
 После создания экземпляра можно запустить запись. С параметром `-v` тексты ошибок выводятся на стандартный вывод ошибок:
 
@@ -462,49 +462,21 @@ error status=<код статуса> issues=<текст сообщений>
 CREATE SECRET source_password WITH (value = "<пароль>");
 ```
 
-Затем создаётся экземпляр репликации для всех 28 таблиц каталога `replication`. Путь на приёмнике совпадает с путём на источнике. Для аутентификации указываются логин в параметре `USER` и секрет с паролем в `PASSWORD_SECRET_PATH`. Соединение устанавливается по `grpcs://`. Корневой сертификат источника передаётся в `CA_CERT` как сырая строка `@@…@@`. Параметр `CONSISTENCY_LEVEL = 'ROW'` задаёт [согласованность уровня строки](../../concepts/async-replication.md#consistency-level-row). Это значение используется по умолчанию.
+Затем создаётся экземпляр репликации для каталога `replication`. Одна пара путей охватывает все таблицы этого каталога, путь на приёмнике совпадает с путём на источнике. Для аутентификации указываются логин в параметре `USER` и секрет с паролем в `PASSWORD_SECRET_PATH`. Соединение устанавливается по `grpcs://`. Корневой сертификат источника передаётся в `CA_CERT` как сырая строка `@@…@@`. Параметр `CONSISTENCY_LEVEL = 'ROW'` задаёт [согласованность уровня строки](../../concepts/async-replication.md#consistency-level-row). Это значение используется по умолчанию.
 
 ```yql
-CREATE ASYNC REPLICATION source_repl
-FOR
-    `replication/pk_bool` AS `replication/pk_bool`,
-    `replication/pk_int8` AS `replication/pk_int8`,
-    `replication/pk_uint8` AS `replication/pk_uint8`,
-    `replication/pk_int16` AS `replication/pk_int16`,
-    `replication/pk_uint16` AS `replication/pk_uint16`,
-    `replication/pk_date` AS `replication/pk_date`,
-    `replication/pk_decimal_narrow` AS `replication/pk_decimal_narrow`,
-    `replication/pk_int32` AS `replication/pk_int32`,
-    `replication/pk_int64` AS `replication/pk_int64`,
-    `replication/pk_uint32` AS `replication/pk_uint32`,
-    `replication/pk_uint64` AS `replication/pk_uint64`,
-    `replication/pk_decimal` AS `replication/pk_decimal`,
-    `replication/pk_decimal_wide` AS `replication/pk_decimal_wide`,
-    `replication/pk_date32` AS `replication/pk_date32`,
-    `replication/pk_datetime` AS `replication/pk_datetime`,
-    `replication/pk_datetime64` AS `replication/pk_datetime64`,
-    `replication/pk_timestamp` AS `replication/pk_timestamp`,
-    `replication/pk_timestamp64` AS `replication/pk_timestamp64`,
-    `replication/pk_interval` AS `replication/pk_interval`,
-    `replication/pk_interval64` AS `replication/pk_interval64`,
-    `replication/pk_uuid` AS `replication/pk_uuid`,
-    `replication/pk_string` AS `replication/pk_string`,
-    `replication/pk_utf8` AS `replication/pk_utf8`,
-    `replication/wide_utf8` AS `replication/wide_utf8`,
-    `replication/wide_string` AS `replication/wide_string`,
-    `replication/wide_json` AS `replication/wide_json`,
-    `replication/wide_json_doc` AS `replication/wide_json_doc`,
-    `replication/wide_yson` AS `replication/wide_yson`
+CREATE ASYNC REPLICATION source_repl FOR `replication` AS `replication`
 WITH (
+    FORMAT = 'BINARY',
     USER = 'test1',
     PASSWORD_SECRET_PATH = 'source_password',
     CONSISTENCY_LEVEL = 'ROW',
-    CONNECTION_STRING = 'grpcs://<источник>:2135/?database=<база-источник>',
+    CONNECTION_STRING = 'grpcs://localhost:2135/?database=/Root/source',
     CA_CERT = @@
 -----BEGIN CERTIFICATE-----
-<содержимое сертификата>
+...
 -----END CERTIFICATE-----
-@@
+    @@
 );
 ```
 
