@@ -76,6 +76,7 @@ Y_UNIT_TEST(IndexesAndPartitions) {
     UNIT_ASSERT(narrowDdl.Contains("pk Bool NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("seq Uint64 NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("seqno Uint64 NOT NULL"));
+    UNIT_ASSERT(narrowDdl.Contains("FAMILY default (COMPRESSION='lz4')"));
     UNIT_ASSERT(!narrowDdl.Contains("UNIFORM_PARTITIONS"));
     UNIT_ASSERT(narrowDdl.Contains("AUTO_PARTITIONING_BY_LOAD = ENABLED"));
     UNIT_ASSERT(narrowDdl.Contains("AUTO_PARTITIONING_MIN_PARTITIONS_COUNT = 3"));
@@ -84,12 +85,14 @@ Y_UNIT_TEST(IndexesAndPartitions) {
 
     const TString plainDdl = CreateTableQuery("/db/replication/pk_uint64", *plain, 1000, 1100);
     UNIT_ASSERT(!plainDdl.Contains("seq_idx"));
+    UNIT_ASSERT(plainDdl.Contains("FAMILY default (COMPRESSION='lz4')"));
     UNIT_ASSERT(!plainDdl.Contains("UNIFORM_PARTITIONS"));
     UNIT_ASSERT_VALUES_EQUAL(AlterIndexQueries("/db/replication/pk_uint64", *plain, 1000, 1100).size(), 1);
 
     const TString wideDdl = CreateTableQuery("/db/replication/wide_json", *wide, 8, 9);
     UNIT_ASSERT(wideDdl.Contains("c_medium Json"));
     UNIT_ASSERT(wideDdl.Contains("c_wide Json"));
+    UNIT_ASSERT(wideDdl.Contains("FAMILY default (COMPRESSION='lz4')"));
     UNIT_ASSERT(!wideDdl.Contains("UNIFORM_PARTITIONS"));
     const TTable* yson = Find("wide_yson");
     UNIT_ASSERT(CreateTableQuery("/db/wide_yson", *yson, 1, 2).Contains("c_medium Yson"));

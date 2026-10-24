@@ -641,6 +641,7 @@ TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minP
     if (table.Composite) {
         out << ", INDEX seq_idx GLOBAL SYNC ON (seq)";
     }
+    out << ", FAMILY default (COMPRESSION='lz4')";
     out << ") WITH (" << PartitionSettings(minPartitions, maxPartitions) << ")";
     return out;
 }
