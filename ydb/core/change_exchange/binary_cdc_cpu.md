@@ -1,138 +1,143 @@
-# Процессорная эффективность двоичного CDC
+# CPU cost of the binary CDC serializer
 
-Рекомендации к реализации из [PR 56373](https://github.com/ydb-platform/ydb/pull/56373), голова `3d78c7dd`.
+Recommendations for the implementation in [PR 56373](https://github.com/ydb-platform/ydb/pull/56373), at `3d78c7dd`.
 
-Двоичный кодек уже убирает с даташарда текстовые преобразования JSON: Base64, разбор `Json` и `JsonDocument`, перевод YSON, форматирование `Decimal` и дат. Дальше почти весь расход процессора на источнике — это не раскладка ячеек, а безусловный zstd в отправителе CDC. Отправитель живёт актором даташарда и делит его исполнитель с планшетом, поэтому этот расход стоит в той же очереди, что и пользовательские транзакции шарда.
+The binary codec already removes the per-cell text conversions of `FORMAT JSON`: Base64 for `String`, parsing of `Json` and `JsonDocument`, YSON-to-JSON, and decimal/date formatting. The remaining source-side CPU cost is in `TBinaryCdcSerializer`, not in the cell layout. Changing the version-1 cell encoding will not move the needle. The changes below are ordered by expected effect. The first three keep the version-1 framing. The fourth changes only how an autopartitioned topic selects a partition.
 
-Менять формат ячеек ради скорости не нужно. Ниже четыре изменения по убыванию эффекта. Первые три совместимы с текущим проводом версии 1. Четвёртое меняет только выбор партиции при автопартиционировании топика.
+`TCdcChangeSenderPartition` is started with `RegisterWithSameMailbox` (`TChangeSender::CreateSendersImpl`). Serialization therefore runs on the source datashard tablet thread. It is not inside the user transaction that produced the change, but a slow serialize blocks every other event on that tablet until it returns.
 
-## Где сейчас уходит время
+## Where the time goes
 
-Горячий путь — `TBinaryCdcSerializer::FillDataChunk` в `ydb/core/tx/datashard/change_record_cdc_serializer.cpp`. На каждую запись данных он:
+`TBinaryCdcSerializer::FillDataChunk` (`ydb/core/tx/datashard/change_record_cdc_serializer.cpp`) does the following for every data record:
 
-1. Заново строит `TColumnMap`: обход всех колонок, сортировка имён, хеш тегов (`BuildColumnMap`).
-2. Разбирает `TSerializedCellVec` и копирует байты каждого непустого значения в отдельный `TString` (`CollectValues`).
-3. Копирует те же байты ещё раз в выходной буфер (`TBinaryCdcWriter::WriteCell`). Буфер заранее резервирует 64 байта.
-4. Сжимает готовый буфер новым контекстом zstd уровня 3 и оставляет сжатый вид только если он короче (`StoreBinaryPayload`).
+1. `BuildColumnMap` walks every column, sorts non-key names, and builds `TagToIndex`. Erase records pay this too.
+2. `CollectValues` parses a `TSerializedCellVec` and `assign`s every non-empty value into its own `TString`.
+3. `TBinaryCdcWriter::WriteCell` copies those bytes again. `Start` reserves 64 bytes, so a large value reallocates the output `TString` as it grows.
+4. `StoreBinaryPayload` compresses the finished buffer and keeps the compressed bytes only when they are strictly shorter.
 
-Ключи в выходной буфер уже пишутся прямо из разобранного `TSerializedCellVec`, без промежуточного `TString`.
+Key cells skip step 2. `AddKey` reads them from the `TSerializedCellVec` that is still alive in `FillDataChunk`.
 
-`TZstdCompress` с `quality = 0` — это уровень по умолчанию, `ZSTD_CLEVEL_DEFAULT` (3). Конструктор каждый раз вызывает `ZSTD_createCStream` и `ZSTD_initCStream`. Для одной непрерывной записи потоковый API не нужен.
+`StoreBinaryPayload` constructs a `TZstdCompress` per record. That constructor calls `ZSTD_createCStream` and `ZSTD_initCStream`. The destructor calls `Finish`, which runs `ZSTD_endStream`. `quality = 0` is not level 0: `zstd.h` defines it as `ZSTD_CLEVEL_DEFAULT` (3). A one-shot buffer does not need the streaming API.
 
-Сжатие вызывается и для heartbeat, и для erase, и для снимка схемы. Heartbeat — это заголовок фиксированного размера около двух десятков байт. Рамка zstd его не уменьшает, а контекст всё равно создаётся.
+The same function compresses heartbeats, erases, and schema snapshots. A heartbeat written by this serializer is exactly 24 bytes: the 8-byte header plus `step` and `txId`. `LeavesIncompressibleAndTinyRecordsRaw` expects that record to stay `RAW`. The `CStream` is still created and destroyed.
 
-JSON ключа и MD5 остаются только на пути автопартиционирования. `TBoundaryPartitionResolver` вызывает `TChangeRecord::GetPartitionKey()`, а тот по-прежнему собирает JSON массива ключа. Без автопартиционирования двоичный поток уже маршрутизируется сырыми ячейками через `CreateDefaultPartitionResolver`. Сам `TBinaryCdcSerializer` поле partition key в `TCmdWrite` не пишет.
+`TBinaryCdcSerializer::Serialize` does not set `TCmdWrite.PartitionKey`. Partition selection is separate:
 
-## 1. Перестать сжимать каждую запись на даташарде
+- Without topic autopartitioning, `ECdcStreamFormatBinary` uses `CreateDefaultPartitionResolver`, which compares raw key cells with `ResolveSchemaBoundaryPartitionId`. No JSON.
+- With autopartitioning, `TBoundaryPartitionResolver` calls `TChangeRecord::GetPartitionKey()`. That parses the key again, runs `SerializeJsonKey` (`ToJson` per column, then `WriteJson`), and MD5s the text. The result is cached on the record. `TBoundaryChooser::GetPartition` hashes that string once more to place it against topic bounds.
 
-Это главный выигрыш. Двоичная запись уже без имён колонок, поэтому в ней меньше повторяемости, чем в JSON. Короткий ряд, erase и случайные байты чаще всего не становятся короче, но процессор на сжатие уже потрачен.
+## 1. Stop compressing every record on the datashard
 
-Оставить контракт провода как есть: `NPersQueueCommon::ZSTD` выставляется только когда сжатое тело короче исходного, `UncompressedSize` пишется только в этом случае. Читатели уже умеют и `RAW`, и `ZSTD`.
+This is the change that matters. A binary record has no repeated column names, so it has less redundancy than the JSON record it replaces. Small rows, erases, and high-entropy values usually do not come out shorter, but level-3 streaming compression has already run.
 
-### Что сделать
+Keep the existing wire rule. Set `NPersQueueCommon::ZSTD` only when the compressed size is strictly smaller, and set `TCmdWrite.UncompressedSize` only in that case, and only when the raw size fits in `i32` (the current `Max<i32>()` check). Readers already accept both `RAW` (`codec = 0`) and `ZSTD` (`codec = 3`, mapped to the SDK codec with `+ 1`).
 
-В `StoreBinaryPayload`:
+In `StoreBinaryPayload`:
 
-- Heartbeat и любое тело короче порога писать как `RAW`, не вызывая zstd. Стартовый порог — 512 байт. Тест `CompressesRepetitivePayload` сжимает 1024 одинаковых байта и при таком пороге остаётся зелёным. Порог стоит подтвердить микробенчмарком и записать в тест явным числом, а не подбирать его по текущему поведению рамки.
-- Для тел не короче порога сжимать одним вызовом `ZSTD_compress2` в переиспользуемый `ZSTD_CCtx`, который хранится полем сериализатора. Сериализатор принадлежит одному актору `TCdcChangeSenderPartition` и между вызовами не делится, отдельная блокировка не нужна.
-- Уровень для записей данных — 1, либо отрицательный быстрый уровень. Уровень 3 на этом пути не окупается: выигрыш в байтах у плотной записи маленький, а уровень 3 заметно дороже уровня 1.
-- Снимок схемы оставить на уровне 3. Он редкий, это тот же повторяющийся JSON, и сжатие там попадает в размер.
+- Write heartbeats as `RAW` and do not call zstd. The payload is 24 bytes; a frame that fails to shrink still costs a `CStream`.
+- Below a size cutoff, write data records as `RAW` without calling zstd. Start the cutoff at 512 bytes so `CompressesRepetitivePayload` (1024 identical bytes) still takes the compress path. Treat 512 as a starting value, measure it, and put the chosen constant in the test. Do not leave the cutoff implicit in zstd's frame overhead.
+- At or above the cutoff, compress with one `ZSTD_compress2` into a `ZSTD_CCtx` stored on the serializer. The serializer is a member of one `TCdcChangeSenderPartition` and is not shared across threads, so the context does not need a lock.
+- Allocate the destination with `TString::Uninitialized(ZSTD_compressBound(n))`. `TString::resize(n)` zero-fills `n` bytes before compression and adds another memcpy-sized cost on large values. Shrink the string to the returned size afterwards.
+- Compare with `got < payload.size()`, matching today's strict inequality.
+- Do not keep level 3 as the data-record default without a measurement. Context setup dominates small records, and level 3 is substantially more expensive than level 1. Benchmark level 1 and one negative fast level (`ZSTD_c_compressionLevel`) on the cases in the last section, and ship the cheaper one that still shrinks the 1024-byte repetitive row.
+- Leave schema snapshots on level 3. They are DDL-rare and their body is the same repetitive JSON document `FORMAT JSON` already produces (`TYdbJsonSerializer::RenderSchemaChangeJson`). Set the context parameter when switching between a data record and a snapshot.
 
-Псевдокод горячего пути:
+Sketch, omitting the `i32` check and error text for brevity:
 
 ```cpp
-void StoreBinaryPayload(TDataChunk& data, TString payload, bool tinyOrHeartbeat) {
-    if (tinyOrHeartbeat || payload.size() < MinCompressBytes) {
+void StoreBinaryPayload(TDataChunk& data, TString payload, int level) {
+    if (payload.size() < MinCompressBytes) {
         data.SetData(std::move(payload));
         return;
     }
+    ZSTD_CCtx_setParameter(Ctx_, ZSTD_c_compressionLevel, level);
     const size_t bound = ZSTD_compressBound(payload.size());
-    TString compressed;
-    compressed.resize(bound);
-    const size_t got = ZSTD_compress2(Ctx_, compressed.data(), bound,
-        payload.data(), payload.size());
+    TString compressed(TString::Uninitialized(bound));
+    const size_t got = ZSTD_compress2(
+        Ctx_, (char*)compressed.data(), bound, payload.data(), payload.size());
     if (ZSTD_isError(got) || got >= payload.size()) {
         data.SetData(std::move(payload));
         return;
     }
     compressed.resize(got);
     data.SetCodec(NPersQueueCommon::ZSTD);
-    UncompressedSize = payload.size();
+    if (payload.size() <= static_cast<size_t>(Max<i32>())) {
+        UncompressedSize = static_cast<ui32>(payload.size());
+    }
     data.SetData(std::move(compressed));
 }
 ```
 
-`ZSTD_CCtx_setParameter(Ctx_, ZSTD_c_compressionLevel, level)` выставляется при создании контекста и при смене уровня между данными и снимком схемы.
+Do not pack several CDC records into one topic message to amortize a context. Offsets, schema barriers, and seqnos are per message. If the remaining goal is disk bytes, compress in the topic partition tablet over a blob that already contains many messages, with one context per blob. That work is not on the datashard thread.
 
-### Чего здесь не делать
+A zstd dictionary is worth trying only if, after the cutoff and the lower level, a large fraction of big records from the same schema still stays `RAW`. It is not part of the first change.
 
-Сжимать несколько CDC-записей в одно сообщение топика. У записи топика свой offset, и пачка внутри одного сообщения ломает барьер схемы и коммит потребителя. Если размер на диске всё ещё важен, сжимать уже на партиции топика, одним контекстом на блок из многих сообщений. Это другой планшет, не поток даташарда.
+## 2. Cache the column map
 
-Словарный zstd имеет смысл только если после порога и уровня 1 останется заметная доля несжатых больших записей с общей схемой. Для первой итерации словарь не нужен.
+After short records stop entering zstd, `BuildColumnMap` is the next schema-sized cost. It sorts every non-key column name on every record, including erases, which never consult the value index.
 
-## 2. Кэшировать карту колонок
+The map is a pure function of the schema snapshot held by `TChangeRecord::GetSchema()` (`TUserTable::TCPtr`). An alter builds a new `TUserTable` (`TUserTable(const TUserTable&, const TTableDescription&)`), and the record keeps the snapshot it was created with. Cache one `TColumnMap` on the serializer. Rebuild it when either the `TUserTable` pointer or `GetTableSchemaVersion()` changes. The pointer distinguishes successive snapshots. The version catches an in-place bump on an object the sender is still holding.
 
-`BuildColumnMap` сортирует имена всех неключевых колонок на каждую запись, включая erase, которому значения не нужны. После отключения zstd на коротких рядах это станет следующей видимой стоимостью на широких таблицах.
+The cache must store key tags and types in primary-key order, value types and name-sorted indexes, `TagToIndex`, and `Wide`. An erase then only parses its key `TSerializedCellVec` and writes the key.
 
-Карта зависит только от снимка схемы, который уже лежит в `record.GetSchema()` и `record.GetSchemaVersion()`. Снимок на время жизни записи не меняется, а соседние записи часто ссылаются на один и тот же `TUserTable`.
+`TUserTable::GetSchema()` is a different function. It returns the serialized `TTableDescription` string. Do not use it as the cache key.
 
-Держать на сериализаторе одну закэшированную карту и пересобирать её, когда меняется указатель на снимок или версия схемы. Указателя достаточно, если новый DDL публикует новый `TUserTable`, а не правит старый объект на месте. Версию хранить рядом как дешёвую проверку.
+## 3. Copy each value once
 
-В кэше нужны типы и порядок ключей, типы и индексы значений, `TagToIndex` и флаг `Wide`. Для erase после кэша остаётся разбор ключевого `TSerializedCellVec` и запись ключа.
+`CollectValues` copies into `TIndexedCell::Storage` so the bytes outlive the `TSerializedCellVec`. In `FillDataChunk` that vector is alive until `writer.Finish()`. The extra `TString` per column is unnecessary. Pass the source `TCell` into `AddValue` / `AddOldImage` / `AddNewImage`, as `AddKey` already does.
 
-## 3. Писать ячейку один раз
+The static empty byte in `TIndexedCell::View` exists only because a zero-length value is not copied and `View` still has to return a non-null pointer. The source cell already has the right null bit and size. Keep using it, including a zero-length non-null cell.
 
-`CollectValues` копирует байты в `TIndexedCell::Storage`, потому что комментарий страхует жизнь ячейки после уничтожения `TSerializedCellVec`. В `FillDataChunk` этот вектор жив до `writer.Finish()`. Промежуточный `TString` на каждую колонку не нужен: `WriteCell` может читать `cell.Data()` напрямую, как это уже сделано для ключей.
+Reserve the output once, before the first `Append`. The size is fixed by data already in hand:
 
-Порядок действий:
+- 8 byte header;
+- 2 bytes for each image count that is present;
+- 16 bytes when `HasTs` is set;
+- 1 marker byte per key column when `NullKeys` is set;
+- for each non-null cell, `CellFixedSize(type)` or `4 + cell.Size()`;
+- 1 byte per value index, or 2 when `Wide` is set;
+- `2 + size` for the user SID and the trace id when those flags are set.
 
-- Разобрать ключ и значения в локальные `TSerializedCellVec` и держать их до конца `Finish`.
-- В писатель передавать `TCell` из этих векторов.
-- Пустую не-NULL ячейку по-прежнему представлять указателем на один нулевой байт и длиной 0, чтобы отличить её от NULL.
-- Перед записью посчитать размер буфера и один раз вызвать `reserve`: заголовок, маркеры NULL-ключей, индексы, длины переменных ячеек и сумма `cell.Size()`. Сейчас `TBinaryCdcWriter::Start` резервирует 64 байта, и длинная строка несколько раз перевыделяет `TString`.
+`TString` growth is geometric. One `reserve` removes the extra copies of a large value. `CellFixedSize` is a type-id switch already required by `WriteCell`; calling it once more while counting is noise next to a copy.
 
-Сортировка изменённых колонок по индексу дешёвая. Её можно оставить: на провод она не влияет, читатель принимает любой порядок индексов, а стабильный порядок удобен тестам.
+Sorting the touched value columns by index is cheap and keeps the bytes stable for tests. The reader accepts any index order (`ReadIndexed` does not require them sorted). Leave the sort.
 
-Порог `Wide` (`map.Values.size() > 127`) включает два байта на индекс уже при 128 неключевых колонках, хотя индекс 127 ещё помещается в 7 бит. Это байты, не процессор. Если трогать константу, заодно обновить `WideIndexStartsAfter127ValueColumns`.
+`map.Wide = map.Values.size() > 127` emits a `u16` index for a table of 128 non-key columns, whose largest index is 127 and still fits in 7 bits. That costs one extra byte per index. It is not a CPU item. `WideIndexStartsAfter127ValueColumns` locks the current threshold; update that test if the predicate changes.
 
-## 4. Сырой ключ маршрутизации при автопартиционировании
+## 4. Hash raw key bytes when the topic is autopartitioned
 
-Без автопартиционирования двоичный поток уже идёт по сырым ключевым ячейкам. Дополнительной работы нет.
+This cost exists only on the autopartitioned path. `GetPartitionKey` re-parses the key and runs `ToJson` on every key column. `String` becomes Base64. `Decimal`, `Pg`, `Json`, `JsonDocument`, and `Yson` go through their text conversions. The MD5 hex is then hashed again inside `TBoundaryChooser::GetPartition`.
 
-С автопартиционированием `TBoundaryPartitionResolver` на каждую запись строит JSON ключа и считает MD5. Для большого строкового ключа это Base64 и сборка JSON на том же даташарде. Сама двоичная запись этот MD5 не хранит.
+For a binary stream, pass the chooser a stable hash of the key's raw cell bytes (the same bytes `AddKey` writes, or `MD5` of `body.GetKey().GetData()` if that blob's encoding is stable). That removes `ToJson` and `WriteJson` from the datashard.
 
-Для двоичного формата передавать в chooser хеш уже сериализованных ключевых ячеек, тех же байт, из которых собран ключ записи. Отдельный проход по типам и текстовое форматирование тогда не нужны.
+The string is the chooser's input, and the chooser hashes it into the topic's existing bounds. It must stay the same for the life of that topic. Replacing it after splits exist moves a given row to a different partition and breaks per-key order. JSON streams keep `MD5(JSON(key))`. A binary stream uses its own derivation. One topic must not accept both derivations.
 
-Назначение партиций станет другим, чем у JSON-потока с MD5. Для нового формата это нормально: старые JSON-потоки продолжают считать прежний ключ, двоичные — свой. Смешивать два способа в одном топике нельзя, иначе одна и та же строка поедет в разные партиции. Делать это до первых боевых двоичных потоков с автопартиционированием.
+Replication turns autopartitioning off for global consistency (`!consistency.HasGlobal()`) and does not advertise it for schema-aware streams. The path still matters for a binary CDC stream whose topic has autopartitioning enabled, and for row-consistent replication when that flag is on.
 
-Глобальная согласованность автопартиционирование репликации выключает. Рекомендация важна для CDC с автопартиционированием и для репликации без глобальной согласованности.
+## Changes that do not buy CPU
 
-## Что не стоит делать ради процессора
+Packing fixed-width columns into one region, or dropping indexes on a full-row image, saves a branch and a few bytes per column. Against one zstd call that is invisible, and it breaks version-1 framing.
 
-Упаковка фиксированных колонок в одну область и отказ от индекса в полной строке экономят несколько ветвлений и байт на колонку. На фоне одного вызова zstd этого не видно, а формат версии 1 придётся ломать.
+A `schemaVersion` field in the data header is worth adding because value indexes are positions in the name-sorted column list of a particular snapshot. It does not change encode cost: one integer store.
 
-Поле `schemaVersion` в заголовок данных стоит добавить из-за позиционных индексов, а не из-за скорости. Восемь байт и одна запись целого на стоимость кодирования не влияют.
+Special-casing `Pg` through `NScheme::GetFixedSize` does not make the encoder faster. `CellFixedSize` returns 0 for `Pg`, so both sides write `u32` length plus the cell bytes. `GetFixedSize` reports the type's stored width, which is a different number for fixed-width `Pg` types. Both sides must keep using `CellFixedSize`.
 
-Отдельный код на `Pg` с `NScheme::GetFixedSize` тоже не нужен. Сейчас любой `Pg` пишется как длина и байты ячейки, и оба конца используют одну функцию. Фиксированная ширина из описания типа эту функцию не ускорит.
+## Order
 
-## Порядок
+1. Heartbeat bypass, size cutoff, a serializer-owned `ZSTD_CCtx`, and a measured level other than 3 for data records. Version-1 readers stay valid.
+2. `TColumnMap` cache keyed by `TUserTable const*` and `GetTableSchemaVersion()`.
+3. One cell copy and a counted `reserve`.
+4. A raw-key hash for autopartitioned binary topics, before such a topic has production splits.
 
-1. Порог, переиспользуемый `ZSTD_CCtx` и уровень 1 для записей данных. Формат версии 1 сохраняется, читатели не меняются.
-2. Кэш `TColumnMap` по снимку схемы.
-3. Одна копия ячейки и `reserve` по посчитанному размеру.
-4. Отдельный хеш сырого ключа для автопартиционирования двоичного потока.
+## How to check
 
-Первые три пункта можно делать на текущем проводе. Четвёртый лучше закрыть до того, как двоичный поток с автопартиционированием начнёт писать боевые данные.
+Microbenchmark `FillDataChunk` on one shard, same schemas, before and after each step:
 
-## Как проверить
+- erase, and an upsert of a few integers, both under the cutoff;
+- upsert of 1024 identical bytes, which must remain `ZSTD`;
+- upsert of 1 KiB and of 64 KiB of incompressible bytes;
+- 100 non-key columns, one column updated, the same snapshot for many records;
+- a snapshot change between records, so the cache rebuilds;
+- autopartitioned routing with a string key of several tens of kilobytes.
 
-Микробенчмарк `FillDataChunk` на одном шарде, одни и те же схемы, до и после каждого пункта:
-
-- erase и upsert из нескольких целых, тело меньше порога;
-- upsert со строкой 1024 одинаковых байт — должен остаться сжатым;
-- upsert с 1 КБ и с 64 КБ несжимаемых байт;
-- таблица на сто неключевых колонок, обновление одной колонки, одна и та же схема на много записей подряд;
-- смена снимка схемы между записями, чтобы кэш пересобирался;
-- путь автопартиционирования со строковым ключом в десятки килобайт.
-
-Смотреть процессорное время сериализатора на запись и долю записей, у которых сжатый размер меньше сырого. Успех первого пункта: короткие записи больше не заходят в zstd, длинные несжимаемые платят один быстрый проход и остаются `RAW`, повторяющаяся длинная строка по-прежнему хранится как `ZSTD`.
+Record serializer CPU time per record and the fraction of records whose compressed size is strictly smaller. The first change is done when records under the cutoff do not enter zstd, an incompressible payload pays for one `ZSTD_compress2` and stays `RAW`, and the repetitive 1024-byte payload is still stored as `ZSTD`.
