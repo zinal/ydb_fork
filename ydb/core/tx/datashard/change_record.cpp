@@ -12,20 +12,11 @@ static void ParseBody(google::protobuf::Message& proto, const TString& body) {
     Y_ENSURE(proto.ParseFromArray(body.data(), body.size()));
 }
 
-const NKikimrChangeExchange::TDataChange& TChangeRecord::GetDataChange() const {
-    Y_ENSURE(Kind == EKind::AsyncIndex
-        || Kind == EKind::IncrementalRestore
-        || Kind == EKind::CdcDataChange);
-
-    if (!ParsedBody) {
-        auto parsed = std::make_shared<NKikimrChangeExchange::TDataChange>();
-        ParseBody(*parsed, Body);
-        BodySize = Body.size();
-        ParsedBody = std::move(parsed);
-        TString().swap(Body);
-    }
-
-    return *ParsedBody;
+template <typename T>
+static T ParseBody(const TString& body) {
+    T proto;
+    ParseBody(proto, body);
+    return proto;
 }
 
 void TChangeRecord::Serialize(NKikimrChangeExchange::TChangeRecord& record) const {
@@ -38,14 +29,11 @@ void TChangeRecord::Serialize(NKikimrChangeExchange::TChangeRecord& record) cons
 
     switch (Kind) {
         case EKind::AsyncIndex:
-            record.MutableAsyncIndex()->CopyFrom(GetDataChange());
-            return;
+            return ParseBody(*record.MutableAsyncIndex(), Body);
         case EKind::IncrementalRestore:
-            record.MutableIncrementalRestore()->CopyFrom(GetDataChange());
-            return;
+            return ParseBody(*record.MutableIncrementalRestore(), Body);
         case EKind::CdcDataChange:
-            record.MutableCdcDataChange()->CopyFrom(GetDataChange());
-            return;
+            return ParseBody(*record.MutableCdcDataChange(), Body);
         case EKind::CdcSchemaChange:
             return ParseBody(*record.MutableCdcSchemaChange(), Body);
         case EKind::CdcHeartbeat:
@@ -62,7 +50,7 @@ TConstArrayRef<TCell> TChangeRecord::GetKey() const {
         case EKind::AsyncIndex:
         case EKind::IncrementalRestore:
         case EKind::CdcDataChange: {
-            const auto& parsed = GetDataChange();
+            const auto parsed = ParseBody<NKikimrChangeExchange::TDataChange>(Body);
 
             TSerializedCellVec key;
             Y_ENSURE(TSerializedCellVec::TryParse(parsed.GetKey().GetData(), key));
@@ -115,7 +103,7 @@ void TChangeRecord::Out(IOutputStream& out) const {
         << " PathId: " << PathId
         << " Kind: " << Kind
         << " Source: " << Source
-        << " Body: " << GetBodySize() << "b"
+        << " Body: " << Body.size() << "b"
         << " TableId: " << TableId
         << " SchemaVersion: " << SchemaVersion
         << " LockId: " << LockId

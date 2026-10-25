@@ -146,14 +146,14 @@ void TChangeSender::ProcessRecords(TVector<IChangeRecord::TPtr>&& records) {
             continue;
         }
 
-        if (it->BodySize != record->GetBodySize()) {
+        if (it->BodySize != record->GetBody().size()) {
             MemUsage -= it->BodySize;
-            MemUsage += record->GetBodySize();
+            MemUsage += record->GetBody().size();
         }
 
         if (record->IsBroadcast()) {
             // assume that broadcast records are too small to affect memory consumption
-            MemUsage -= record->GetBodySize();
+            MemUsage -= record->GetBody().size();
         }
 
         PendingSent.emplace(record->GetOrder(), std::move(record));
@@ -312,8 +312,8 @@ void TChangeSender::SendPreparedRecords(ui64 partitionId) {
     sender.Pending.reserve(toSend.size());
     for (const auto& record : toSend) {
         if (!record->IsBroadcast()) {
-            sender.Pending.emplace_back(record->GetOrder(), record->GetBodySize());
-            MemUsage -= record->GetBodySize();
+            sender.Pending.emplace_back(record->GetOrder(), record->GetBody().size());
+            MemUsage -= record->GetBody().size();
         } else {
             sender.Broadcasting.push_back(record->GetOrder());
         }
@@ -352,8 +352,8 @@ void TChangeSender::ReEnqueueRecords(ui64 partitionId, const TSender& sender) {
     TVector<ui64> preparedBroadcasts;
     for (const auto& record : sender.Prepared) {
         if (!record->IsBroadcast()) {
-            Enqueued.insert(ReEnqueue(record->GetOrder(), record->GetBodySize()));
-            MemUsage -= record->GetBodySize();
+            Enqueued.insert(ReEnqueue(record->GetOrder(), record->GetBody().size()));
+            MemUsage -= record->GetBody().size();
         } else {
             // Broadcasts held back after a barrier split are not in sender.Broadcasting yet,
             // but the partition was already removed from PendingPartitions when prepared.
@@ -383,7 +383,7 @@ TChangeSender::TBroadcast& TChangeSender::EnsureBroadcast(IChangeRecord::TPtr re
     }
 
     auto res = Broadcasting.emplace(record->GetOrder(), TBroadcast{
-        .Record = {record->GetOrder(), record->GetBodySize()},
+        .Record = {record->GetOrder(), record->GetBody().size()},
         .Partitions = partitionIds,
         .PendingPartitions = partitionIds,
     });
