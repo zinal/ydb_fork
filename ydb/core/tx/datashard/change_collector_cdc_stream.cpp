@@ -23,6 +23,30 @@ namespace {
         return result;
     }
 
+    auto MakeValueTags(const TMap<TTag, TUserTable::TUserColumn>& columns) {
+        TVector<TTag> result(Reserve(columns.size() - 1));
+
+        for (const auto& [tag, column] : columns) {
+            if (!column.IsKey) {
+                result.push_back(tag);
+            }
+        }
+
+        return result;
+    }
+
+    auto MakeValueTypes(const TMap<TTag, TUserTable::TUserColumn>& columns) {
+        TVector<NScheme::TTypeInfo> result(Reserve(columns.size() - 1));
+
+        for (const auto& [_, column] : columns) {
+            if (!column.IsKey) {
+                result.push_back(column.Type);
+            }
+        }
+
+        return result;
+    }
+
     auto MakeUpdates(TArrayRef<const TCell> cells, TArrayRef<const TTag> tags, TArrayRef<const NScheme::TTypeInfo> types) {
         TVector<TUpdateOp> result(Reserve(cells.size()));
 
@@ -92,29 +116,6 @@ namespace {
 
 void TCdcStreamChangeCollector::OnRestart() {
     TBaseChangeCollector::OnRestart();
-    CachedValueSchema.Clear();
-    CachedNeedToReadKeys.Clear();
-}
-
-const TCdcStreamChangeCollector::TValueSchema& TCdcStreamChangeCollector::GetValueSchema(const TUserTable::TCPtr& table) {
-    if (!CachedValueSchema || CachedValueSchema->Table != table || CachedValueSchema->Version != table->GetTableSchemaVersion()) {
-        auto& schema = CachedValueSchema.ConstructInPlace();
-        // Column changes replace TUserTable. Keep it alive to identify the schema,
-        // and also check its version to handle schema version resets.
-        schema.Table = table;
-        schema.Version = table->GetTableSchemaVersion();
-        const auto valueCount = table->Columns.size() - table->KeyColumnIds.size();
-        schema.Tags.reserve(valueCount);
-        schema.Types.reserve(valueCount);
-        for (const auto& [tag, column] : table->Columns) {
-            if (!column.IsKey) {
-                schema.Tags.push_back(tag);
-                schema.Types.push_back(column.Type);
-            }
-        }
-    }
-
-    return *CachedValueSchema;
 }
 
 bool TCdcStreamChangeCollector::NeedToReadKeys() const {
@@ -194,7 +195,8 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
     auto userTable = Self->GetUserTables().at(tableId.PathId.LocalPathId);
     const auto& keyTags = userTable->KeyColumnIds;
     const auto& keyTypes = userTable->KeyColumnTypes;
-    TMaybe<TVector<TCell>> keyCells;
+    const auto valueTags = MakeValueTags(userTable->Columns);
+    const auto valueTypes = MakeValueTypes(userTable->Columns);
 
     Y_ENSURE(key.size() == keyTags.size(), "Count doesn't match"
         << ": key# " << key.size()
@@ -218,26 +220,10 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
             continue; // do not generate change record at all
         case NKikimrSchemeOp::ECdcStreamStateScan:
             if (const auto* info = Self->GetCdcStreamScanManager().Get(pathId)) {
-                if (info->LastKey) {
-                    const auto& lastKeyCells = info->LastKey->GetCells();
-                    if (!keyCells) {
-                        keyCells = MakeKeyCells(key);
-                    }
-
-                    Y_ENSURE(keyCells->size() == lastKeyCells.size());
-                    Y_ENSURE(keyCells->size() == keyTypes.size());
-
-                    if (CompareTypedCellVectors(keyCells->data(), lastKeyCells.data(), keyTypes.data(), keyCells->size()) <= 0) {
-                        // This prefix is already covered by persisted scan progress.
-                        // Only the ordinary change record below is needed.
-                        break;
-                    }
-                }
-
                 snapshotVersion = info->SnapshotVersion;
 
                 TSelectStats stats;
-                const auto stateAtSnapshot = GetState(tableId, key, GetValueSchema(userTable).Tags, stats, info->SnapshotVersion);
+                const auto stateAtSnapshot = GetState(tableId, key, valueTags, stats, info->SnapshotVersion);
                 if (!stateAtSnapshot) {
                     return false;
                 }
@@ -245,8 +231,21 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
                 const auto state = stateAtSnapshot->GetRowState();
                 const bool presentInSnapshot = (state == ERowOp::Upsert || state == ERowOp::Reset);
 
-                if (presentInSnapshot && !stats.InvisibleRowSkips) {
+                if (!presentInSnapshot || stats.InvisibleRowSkips) {
+                    // just generate change record
+                } else if (!info->LastKey) {
                     initialState = stateAtSnapshot;
+                } else {
+                    const auto& lastKeyCells = info->LastKey->GetCells();
+                    const auto keyCells = MakeKeyCells(key);
+
+                    Y_ENSURE(keyCells.size() == lastKeyCells.size());
+                    Y_ENSURE(keyCells.size() == keyTypes.size());
+
+                    const int cmp = CompareTypedCellVectors(keyCells.data(), lastKeyCells.data(), keyTypes.data(), keyCells.size());
+                    if (cmp > 0) {
+                        initialState = stateAtSnapshot;
+                    }
                 }
             } else {
                 // nop, scan is completed
@@ -259,9 +258,6 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
         if (initialState) {
             Y_ENSURE(snapshotVersion.Defined());
             TVersionContext ctx(Sink, *snapshotVersion);
-            const auto& valueSchema = GetValueSchema(userTable);
-            const auto& valueTags = valueSchema.Tags;
-            const auto& valueTypes = valueSchema.Types;
 
             switch (stream.Mode) {
             case NKikimrSchemeOp::ECdcStreamModeKeysOnly:
@@ -297,8 +293,7 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
             Y_ENSURE(false, "Invariant violation: source table must be locked before restore.");
         case NKikimrSchemeOp::ECdcStreamModeNewImage:
         case NKikimrSchemeOp::ECdcStreamModeOldImage:
-        case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages: {
-            const auto& valueTags = GetValueSchema(userTable).Tags;
+        case NKikimrSchemeOp::ECdcStreamModeNewAndOldImages:
             if (const auto oldState = GetState(tableId, key, valueTags)) {
                 if (stream.Mode == NKikimrSchemeOp::ECdcStreamModeOldImage) {
                     Persist(tableId, pathId, rop, key, keyTags, NullIfErased(&*oldState), nullptr, valueTags, userCtx);
@@ -314,7 +309,6 @@ bool TCdcStreamChangeCollector::Collect(const TTableId& tableId, ERowOp rop,
                 return false;
             }
             break;
-        }
         default:
             Y_ENSURE(false, "Invalid stream mode: " << static_cast<ui32>(stream.Mode));
         }
