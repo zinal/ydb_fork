@@ -93,8 +93,11 @@ bool OwnersFit(ui64 recordSize, ui32 chunkCount) {
     return recordSize >= need;
 }
 
-// Version 7 record layout written by WriteSysLogRestorePoint, with no bytes past the proto.
-bool SysLogV7MatchesChunkCount(const ui8* data, ui64 size, ui32 chunkCount) {
+// Version 7 record written by WriteSysLogRestorePoint.
+// exactEnd: the compatibility blob ends on the last payload byte. A crashed grow
+// leaves that exact older record in place. A record that already covers DiskSize
+// may be accepted with trailing bytes.
+bool SysLogV7Layout(const ui8* data, ui64 size, ui32 chunkCount, bool exactEnd) {
     ui64 offset = sizeof(TSysLogRecord) + ui64(sizeof(TChunkInfo)) * chunkCount + sizeof(TSysLogFirstNoncesToKeep);
     if (size < offset + sizeof(ui64) + sizeof(ui32) + sizeof(ui32)) {
         return false;
@@ -110,7 +113,14 @@ bool SysLogV7MatchesChunkCount(const ui8* data, ui64 size, ui32 chunkCount) {
     offset += sizeof(ui32); // FirstLogChunkToParseCommits
     const ui32 protoSize = ReadUnaligned<ui32>(data + offset);
     offset += sizeof(ui32);
-    return protoSize > 0 && offset + protoSize == size;
+    if (protoSize == 0 || offset + protoSize > size) {
+        return false;
+    }
+    return !exactEnd || offset + protoSize == size;
+}
+
+bool SysLogV7MatchesChunkCount(const ui8* data, ui64 size, ui32 chunkCount) {
+    return SysLogV7Layout(data, size, chunkCount, true);
 }
 
 bool FindShorterChunkCount(const ui8* data, ui64 size, ui32 diskChunkCount, ui32 minChunkCount, ui32& found) {
@@ -223,19 +233,30 @@ void NoteSysLogParse(TPDisk* pdisk, ui64 payloadBytes, bool mapCoversDisk) {
 
 bool ResolveSysLogChunkCount(const void* record, ui64 recordSize, ui32 recordVersion,
         ui32 diskChunkCount, ui32 minChunkCount, ui64 formatFlags, ui32& mapChunkCount) {
+    const auto* data = static_cast<const ui8*>(record);
+    if (recordVersion >= PDISK_SYS_LOG_RECORD_VERSION_7) {
+        // Owners of diskChunkCount fitting in the buffer is not enough: after a grow
+        // the new chunk-info array overlaps the nonce, trim and proto tail of the
+        // previous record. The trailer has to describe this chunk count.
+        if (SysLogV7Layout(data, recordSize, diskChunkCount, false)) {
+            mapChunkCount = diskChunkCount;
+            return true;
+        }
+        if ((formatFlags & FormatFlagShortChunkMap) == 0) {
+            return false;
+        }
+        ui32 found = 0;
+        if (!FindShorterChunkCount(data, recordSize, diskChunkCount, minChunkCount, found)) {
+            return false;
+        }
+        mapChunkCount = found;
+        return true;
+    }
     if (OwnersFit(recordSize, diskChunkCount)) {
         mapChunkCount = diskChunkCount;
         return true;
     }
-    if ((formatFlags & FormatFlagShortChunkMap) == 0 || recordVersion < PDISK_SYS_LOG_RECORD_VERSION_7) {
-        return false;
-    }
-    ui32 found = 0;
-    if (!FindShorterChunkCount(static_cast<const ui8*>(record), recordSize, diskChunkCount, minChunkCount, found)) {
-        return false;
-    }
-    mapChunkCount = found;
-    return true;
+    return false;
 }
 
 void ClearShortChunkMapAllowance(TPDisk& disk) {
