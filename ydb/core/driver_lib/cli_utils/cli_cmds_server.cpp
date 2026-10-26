@@ -1,5 +1,7 @@
 #include "cli_cmds_server.h"
 
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_grow.h>
+
 namespace NKikimr::NDriverClient {
 
 TClientCommandServer::TClientCommandServer(std::shared_ptr<TModuleFactories> factories)
@@ -66,6 +68,7 @@ void TClientCommandServer::Config(TConfig& config) {
 
 void TClientCommandServer::Parse(TConfig& config) {
     TClientCommand::Parse(config);
+    NPDisk::SetGrowToDeviceSizeEnabled(config.ParseResult->Has("pdisk-grow-to-device-size"));
     InitCfg.ValidateOptions(*config.Opts, *config.ParseResult);
     InitCfg.Parse(config.ParseResult->GetFreeArgs(), Factories->ConfigSwissKnife.get());
 }

@@ -2,6 +2,7 @@
 #include "blobstorage_pdisk_completion_impl.h"
 #include "blobstorage_pdisk_data.h"
 #include "blobstorage_pdisk_factory.h"
+#include "blobstorage_pdisk_grow.h"
 #include "blobstorage_pdisk_impl.h"
 #include "blobstorage_pdisk_mon.h"
 #include "blobstorage_pdisk_requestimpl.h"
@@ -560,11 +561,15 @@ public:
                 // We still need main key after restart
                 // SecureWipeBuffer((ui8*)MainKey.data(), sizeof(NPDisk::TKey) * MainKey.size());
             } else {
-                // Format is read OK
+                // Format is read OK. Keep the main key only if this boot may rewrite the format.
+                if (BootMayRewriteFormat(*PDisk)) {
+                    RememberFormatMainKey(PDisk.Get(), MainKey);
+                }
                 SecureWipeBuffer((ui8*)MainKey.Keys.data(), sizeof(NPDisk::TKey) * MainKey.Keys.size());
                 P_LOG(PRI_NOTICE, BSP01, "Successfully read format record", (Format, PDisk->Format.ToString()));
                 TString info;
                 if (!PDisk->CheckGuid(&info)) {
+                    ForgetFormatMainKey(PDisk.Get());
                     *PDisk->Mon.PDiskState = NKikimrBlobStorage::TPDiskState::InitialFormatReadError;
                     *PDisk->Mon.PDiskBriefState = TPDiskMon::TPDisk::Error;
                     *PDisk->Mon.PDiskDetailedState = TPDiskMon::TPDisk::ErrorInitialFormatReadDueToGuid;
@@ -577,6 +582,7 @@ public:
                     *PDisk->Mon.PDiskState = NKikimrBlobStorage::TPDiskState::InitialFormatReadError;
                     *PDisk->Mon.PDiskBriefState = TPDiskMon::TPDisk::Error;
                     *PDisk->Mon.PDiskDetailedState = TPDiskMon::TPDisk::ErrorInitialFormatReadIncompleteFormat;
+                    ForgetFormatMainKey(PDisk.Get());
                     PDisk->ErrorStr = "Can't start due to incomplete format!";
                     TStringStream str;
                     str << "PDiskId# " << PCtx->PDiskId << " " << PDisk->ErrorStr << " "

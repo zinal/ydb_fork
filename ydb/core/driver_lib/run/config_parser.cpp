@@ -1,5 +1,7 @@
 #include "config_parser.h"
 
+#include <ydb/core/blobstorage/pdisk/blobstorage_pdisk_grow.h>
+
 #include <ydb/library/actors/core/log_settings.h>
 #include <ydb/public/lib/base/msgbus.h>
 #include <ydb/public/lib/deprecated/client/msgbus_client.h>
@@ -262,6 +264,12 @@ void TRunCommandConfigParser::ParseRunOpts(int argc, char **argv) {
 
     opts.AddLongOption('n', "node", "Node ID")
             .RequiredArgument(Sprintf("NUM (0,%d]", NActors::TActorId::MaxNodeId)).Required().StoreResult(&RunOpts.NodeId);
+    bool growToDeviceSize = false;
+    opts.AddLongOption("pdisk-grow-to-device-size",
+            "On start, if a PDisk file or device is larger than its formatted size, append free chunks "
+            "when the existing syslog area can store the larger chunk map")
+        .NoArgument()
+        .SetFlag(&growToDeviceSize);
     opts.AddLongOption("proxy", "Bind to proxy(-ies)").RequiredArgument("ADDR").AppendTo(&RunOpts.ProxyBindToProxy);
     opts.AddLongOption("mon-port", "Monitoring port").OptionalArgument("NUM").StoreResult(&RunOpts.MonitoringPort);
     opts.AddLongOption("mon-address", "Monitoring address").OptionalArgument("ADDR").StoreResult(&RunOpts.MonitoringAddress);
@@ -280,6 +288,7 @@ void TRunCommandConfigParser::ParseRunOpts(int argc, char **argv) {
     opts.ArgPermutation_ = REQUIRE_ORDER;
 
     TOptsParseResult res(&opts, argc, argv);
+    NPDisk::SetGrowToDeviceSizeEnabled(growToDeviceSize);
     ParseConfigFiles(res);
 
     if ((res.GetFreeArgCount() > 0) && (res.GetFreeArgs().at(0) == "mbus")) {

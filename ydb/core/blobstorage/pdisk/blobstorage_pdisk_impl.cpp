@@ -1,6 +1,7 @@
 #include "blobstorage_pdisk_impl.h"
 
 #include "blobstorage_pdisk_chunk_id_formatter.h"
+#include "blobstorage_pdisk_grow.h"
 #include "blobstorage_pdisk_completion_impl.h"
 #include "blobstorage_pdisk_mon.h"
 #include "blobstorage_pdisk_request_id.h"
@@ -289,6 +290,7 @@ TString TPDisk::StartupOwnerInfo() {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 TPDisk::~TPDisk() {
+    ForgetFormatMainKey(this);
     TPDisk::Stop();
     Y_ABORT_UNLESS(InputQueue.GetWaitingSize() == 0);
 }
@@ -1600,20 +1602,24 @@ void TPDisk::CommitLogChunks(TCommitLogChunks &req) {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 void TPDisk::WriteApplyFormatRecord(TDiskFormat format, const TKey &mainKey) {
-    // Use temporal copy of format to restore from that copy because we can damage 'format' variable
-    // by writing Magic in first bytes
-    const TDiskFormat originalFormat = format;
-    Format = format;
-    Format.ChunkSize = FormatSectorSize * ReplicationFactor;
-    Format.SectorSize = FormatSectorSize;
+    // The format record is written with format-sector geometry. That geometry used to be
+    // published on TPDisk::Format for the duration of the synchronous write. Log-read
+    // completions divide the device offset by Format.ChunkSize and abort when the index
+    // falls outside ChunkState, so keep the temporary geometry on a local copy.
+    // `appliedFormat` is taken before the in-progress magic can overwrite the bytes
+    // that stay in memory; the bytes written below still include that magic.
+    const TDiskFormat appliedFormat = format;
+    TDiskFormat geometry = format;
+    geometry.ChunkSize = FormatSectorSize * ReplicationFactor;
+    geometry.SectorSize = FormatSectorSize;
 
     {
 
         // Encrypt chunk0 format record using mainKey
         ui64 nonce = 1;
         bool encrypt = true; // Always write encrypter format because some tests use wrong main key to initiate errors
-        TSysLogWriter formatWriter(Mon, *BlockDevice.Get(), Format, nonce, mainKey, BufferPool.Get(),
-                0, ReplicationFactor, Format.MagicFormatChunk, 0, nullptr, 0, nullptr, PCtx,
+        TSysLogWriter formatWriter(Mon, *BlockDevice.Get(), geometry, nonce, mainKey, BufferPool.Get(),
+                0, ReplicationFactor, format.MagicFormatChunk, 0, nullptr, 0, nullptr, PCtx,
                 &DriveModel, encrypt);
 
         if (format.IsFormatInProgress()) {
@@ -1630,7 +1636,7 @@ void TPDisk::WriteApplyFormatRecord(TDiskFormat format, const TKey &mainKey) {
         doneEvent.WaitI();
     }
 
-    Format = originalFormat;
+    Format = appliedFormat;
 }
 
 

@@ -339,6 +339,7 @@ struct TCommonAppOptions {
     bool SysLogEnabled = false;
     bool TcpEnabled = false;
     bool SuppressVersionCheck = false;
+    bool PDiskGrowToDeviceSize = false;
     EWorkload Workload = EWorkload::Hybrid;
     TString SeedNodesFile;
     TVector<TString> SeedNodes;
@@ -436,6 +437,10 @@ struct TCommonAppOptions {
         opts.AddLongOption("config-dir", "Directory to store Yaml config").RequiredArgument("PATH").StoreResult(&ConfigDirPath);
         opts.AddLongOption("tiny-mode", "Start in a tiny mode")
             .NoArgument().SetFlag(&TinyMode);
+        opts.AddLongOption("pdisk-grow-to-device-size",
+                "On start, if a PDisk file or device is larger than its formatted size, append free chunks "
+                "when the existing syslog area can store the larger chunk map")
+            .NoArgument().SetFlag(&PDiskGrowToDeviceSize);
         opts.AddLongOption("workload", Sprintf("Workload to be served by this node, allowed values are %s", GetEnumAllNames<EWorkload>().data()))
             .RequiredArgument("NAME").StoreResult(&Workload);
         opts.AddLongOption("seed-nodes", "Path to seed nodes configuration file")

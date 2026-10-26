@@ -1,6 +1,7 @@
 #include "blobstorage_pdisk_impl.h"
 
 #include "blobstorage_pdisk_completion_impl.h"
+#include "blobstorage_pdisk_grow.h"
 #include "blobstorage_pdisk_logreader.h"
 #include "blobstorage_pdisk_syslogreader.h"
 
@@ -272,23 +273,28 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
 
     // Set initial chunk owners
     // Use actual format info to set busy chunks mask
-    ui32 chunkCount = (ui32)(Format.DiskSize / (ui64)Format.ChunkSize);
+    const ui32 diskChunkCount = (ui32)(Format.DiskSize / (ui64)Format.ChunkSize);
+    ui32 chunkCount = diskChunkCount;
     Y_DEBUG_ABORT_UNLESS(ChunkState.size() == 0);
-    ChunkState = TVector<TChunkState>(chunkCount);
+    ChunkState = TVector<TChunkState>(diskChunkCount);
     Y_ABORT_UNLESS(ChunkState.size() >= Format.SystemChunkCount);
     for (ui32 i = 0; i < Format.SystemChunkCount; ++i) {
         ChunkState[i].OwnerId = OwnerSystem;
     }
 
-    DriveModel.SetTotalChunksCount(Format.DiskSizeChunks());
+    DriveModel.SetTotalChunksCount(diskChunkCount);
 
     // Parse chunk owners
     TChunkInfo* chunkOwners = (TChunkInfo*)(sysLogRecord + 1);
 
-    // Make sure it is not out of bounds
+    // Make sure it is not out of bounds. A crashed grow may have stored a larger DiskSize
+    // before the syslog record was rewritten; that format carries FormatFlag bit 8 and the
+    // record still describes the previous, smaller chunk count.
     remainingSize -= sizeof(TSysLogRecord);
-    ui64 expectedSize = chunkCount * sizeof(TChunkInfo);
-    if (remainingSize < expectedSize) {
+    const ui32 minChunkCount = Max<ui32>(Format.SystemChunkCount, 1);
+    if (!ResolveSysLogChunkCount(lastSysLogRecord.data(), lastSysLogRecord.size(), sysLogRecord->Version,
+            diskChunkCount, minChunkCount, Format.FormatFlags, chunkCount)) {
+        const ui64 expectedSize = ui64(diskChunkCount) * sizeof(TChunkInfo);
         errorReason = TStringBuilder() << " remainingSize# " << remainingSize
             << " < expectedSize# " << expectedSize
             << " writePosition# " << writePosition
@@ -297,6 +303,11 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
 
         P_LOG(PRI_ERROR, BPD51, "error while reading sys log", (ErrorReason, errorReason));
         return false;
+    }
+    if (chunkCount < diskChunkCount) {
+        P_LOG(PRI_NOTICE, BPD01, "Syslog chunk map is shorter than the formatted disk, tail chunks are free",
+            (MapChunks, chunkCount),
+            (DiskChunks, diskChunkCount));
     }
 
     // Checks are passed, so initialize position
@@ -358,6 +369,11 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
         } else {
           ChunkState[i].ShredGeneration = 0;
           isNonCurrentGenPresent = true;
+        }
+    }
+    if (chunkCount < diskChunkCount && ShredGeneration != 0) {
+        for (ui32 i = chunkCount; i < diskChunkCount; ++i) {
+            ChunkState[i].ShredGeneration = ShredGeneration;
         }
     }
     if (ShredGeneration == 0) {
@@ -502,6 +518,7 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
     // needed for further parsing
     Y_UNUSED(compatibilityInfoEnd);
 
+    NoteSysLogParse(this, lastSysLogRecord.size(), chunkCount == diskChunkCount);
     PrintChunksDebugInfo();
     return true;
 }
@@ -1490,6 +1507,7 @@ void TPDisk::InitiateReadSysLog(const TActorId &pDiskActor) {
 void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResult, const TActorId &pDiskActor) {
     TStringStream errStr;
     if (evReadLogResult.Status != NKikimrProto::OK) {
+        ForgetFormatMainKey(this);
         P_LOG(PRI_ERROR, BPD01, "Error on log read",
             (evReadLogResult, evReadLogResult.ToString()),
             (InitPhase, InitPhase.load()));
@@ -1522,6 +1540,7 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
             bool success = ProcessChunk0(evReadLogResult, errorReason);
 
             if (InitialSysLogWritePosition == 0 || !success) {
+                ForgetFormatMainKey(this);
                 ErrorStr = errorReason;
                 *Mon.PDiskState = NKikimrBlobStorage::TPDiskState::InitialSysLogParseError;
                 *Mon.PDiskBriefState = TPDiskMon::TPDisk::Error;
@@ -1539,6 +1558,17 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
         }
         case EInitPhase::ReadingLog:
         {
+            // Drops the format main key on every exit from this boot stage.
+            struct TForgetFormatKey {
+                TPDisk* Self;
+                ~TForgetFormatKey() {
+                    ForgetFormatMainKey(Self);
+                }
+            } forgetFormatKey{this};
+            Y_UNUSED(forgetFormatKey);
+
+            ClearShortChunkMapAllowance(*this);
+
             InitialLogPosition = evReadLogResult.NextPosition;
             if (InitialLogPosition == TLogPosition{0, 0}) {
                 *Mon.PDiskState = NKikimrBlobStorage::TPDiskState::InitialCommonLogParseError;
@@ -1552,8 +1582,10 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
             LastInitialChunkIdx = evReadLogResult.LastGoodChunkIdx;
             LastInitialSectorIdx = evReadLogResult.LastGoodSectorIdx;
 
-            // Initialize metadata.
+            // Initialize metadata before appending chunks, so a short metadata budget
+            // keeps taking space from the previously formatted disk.
             InitFormattedMetadata();
+            TryGrowToDeviceSize(*this);
             // Prepare the FreeChunks list
             InitFreeChunks();
             // Actualize LogChunks counters according to OwnerData
