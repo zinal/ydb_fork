@@ -1,6 +1,7 @@
 #include "blobstorage_pdisk_impl.h"
 
 #include "blobstorage_pdisk_chunk_id_formatter.h"
+#include "blobstorage_pdisk_grow.h"
 #include "blobstorage_pdisk_completion_impl.h"
 #include "blobstorage_pdisk_mon.h"
 #include "blobstorage_pdisk_request_id.h"
@@ -289,6 +290,7 @@ TString TPDisk::StartupOwnerInfo() {
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 TPDisk::~TPDisk() {
+    ForgetFormatMainKey(this);
     TPDisk::Stop();
     Y_ABORT_UNLESS(InputQueue.GetWaitingSize() == 0);
 }
