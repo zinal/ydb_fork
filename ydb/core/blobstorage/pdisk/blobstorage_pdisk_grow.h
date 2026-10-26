@@ -7,7 +7,7 @@ namespace NKikimr::NPDisk {
 class TPDisk;
 struct TMainKey;
 
-// Set from the "run --pdisk-grow-to-device-size" command-line flag.
+// Set from "ydbd server --pdisk-grow-to-device-size" or "run --pdisk-grow-to-device-size".
 void SetGrowToDeviceSizeEnabled(bool enabled);
 bool GrowToDeviceSizeEnabled();
 
