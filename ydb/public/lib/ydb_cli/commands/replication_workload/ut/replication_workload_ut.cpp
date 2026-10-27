@@ -228,6 +228,7 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
     ui32 updates = 0;
     ui32 twoColumns = 0;
     ui32 threeColumns = 0;
+    ui32 fourColumns = 0;
     bool sawBoolKey = false;
     for (int seed = 0; seed < 40; ++seed) {
         TVector<TTableRuntime> state(tables.size());
@@ -249,11 +250,13 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
             UNIT_ASSERT(write.Statement.Contains(" WHERE "));
             const ui32 assigned = UpdateAssignmentCount(write.Statement);
             UNIT_ASSERT(assigned >= 2);
-            UNIT_ASSERT(assigned <= 3);
+            UNIT_ASSERT(assigned <= 4);
             if (assigned == 2) {
                 ++twoColumns;
-            } else {
+            } else if (assigned == 3) {
                 ++threeColumns;
+            } else {
+                ++fourColumns;
             }
             ui32 seqnoAssignments = 0;
             for (const TBoundParam& param : write.Params) {
@@ -275,6 +278,7 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
     UNIT_ASSERT(updates > 0);
     UNIT_ASSERT(twoColumns > 0);
     UNIT_ASSERT(threeColumns > 0);
+    UNIT_ASSERT(fourColumns > 0);
     UNIT_ASSERT(sawBoolKey);
 }
 
