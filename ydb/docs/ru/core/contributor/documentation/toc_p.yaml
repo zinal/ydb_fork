@@ -11,3 +11,5 @@ items:
   href: guide-to-public-material.md
 - name: Документирование новых команд CLI
   href: cli-command-documentation.md
+- name: Сопоставление concepts и YDB Book
+  href: concepts-vs-ydb-book.md
