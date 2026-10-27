@@ -1071,10 +1071,16 @@ TTxPlan BuildTransaction(
         for (ui64 number : item.UpdateNumbers) {
             TRowWrite write;
             write.Update = true;
-            const int columnCount = std::uniform_int_distribution<int>(1, 3)(rng);
+            // seqno is always assigned, and at least one other value column is
+            // assigned with it. An update never changes seqno alone.
             TVector<size_t> eligible = ValueColumnsExceptSeqno(table);
+            if (eligible.empty()) {
+                continue;
+            }
             std::shuffle(eligible.begin(), eligible.end(), rng);
-            const int extras = std::min<int>(columnCount - 1, static_cast<int>(eligible.size()));
+            const int extras = std::min<int>(
+                std::uniform_int_distribution<int>(1, 2)(rng),
+                static_cast<int>(eligible.size()));
             TVector<const TColumn*> chosen;
             for (const TColumn& column : table.Columns) {
                 if (column.Name == "seqno") {

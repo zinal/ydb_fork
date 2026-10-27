@@ -208,43 +208,74 @@ Y_UNIT_TEST(ImportBatchUsesAsTable) {
     UNIT_ASSERT_VALUES_EQUAL(items, 2);
 }
 
-Y_UNIT_TEST(UpdateTouchesOneToThreeColumnsAndFullKey) {
-    const TVector<TTable>& tables = AllTables();
-    TVector<TTableRuntime> state(tables.size());
-    for (TTableRuntime& table : state) {
-        table.Boundary = 9;
-    }
-    std::mt19937_64 rng(5);
-    const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 100, 4, rng);
-    UNIT_ASSERT(!plan.Busy);
-    UNIT_ASSERT(!plan.Writes.empty());
-    bool sawUpdate = false;
-    for (const TRowWrite& write : plan.Writes) {
-        if (!write.Update) {
-            UNIT_ASSERT(write.Statement.Contains("UPSERT INTO"));
-            continue;
+ui32 UpdateAssignmentCount(const TString& statement) {
+    const size_t setPos = statement.find(" SET ");
+    const size_t wherePos = statement.find(" WHERE ");
+    UNIT_ASSERT(setPos != TString::npos);
+    UNIT_ASSERT(wherePos != TString::npos && wherePos > setPos);
+    const TString assignments = statement.substr(setPos + 5, wherePos - (setPos + 5));
+    ui32 count = assignments.empty() ? 0 : 1;
+    for (char ch : assignments) {
+        if (ch == ',') {
+            ++count;
         }
-        sawUpdate = true;
-        UNIT_ASSERT(write.Statement.Contains("UPDATE "));
-        UNIT_ASSERT(write.Statement.Contains("seqno = $"));
-        UNIT_ASSERT(write.Statement.Contains(" WHERE "));
-        const size_t setPos = write.Statement.find(" SET ");
-        const size_t wherePos = write.Statement.find(" WHERE ");
-        const TString assignments = write.Statement.substr(setPos, wherePos - setPos);
-        ui32 commas = 0;
-        for (char ch : assignments) {
-            if (ch == ',') {
-                ++commas;
+    }
+    return count;
+}
+
+Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
+    const TVector<TTable>& tables = AllTables();
+    ui32 updates = 0;
+    ui32 twoColumns = 0;
+    ui32 threeColumns = 0;
+    bool sawBoolKey = false;
+    for (int seed = 0; seed < 40; ++seed) {
+        TVector<TTableRuntime> state(tables.size());
+        for (TTableRuntime& table : state) {
+            table.Boundary = 9;
+        }
+        std::mt19937_64 rng(5 + seed);
+        const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 100 + seed, 4, rng);
+        UNIT_ASSERT(!plan.Busy);
+        UNIT_ASSERT(!plan.Writes.empty());
+        for (const TRowWrite& write : plan.Writes) {
+            if (!write.Update) {
+                UNIT_ASSERT(write.Statement.Contains("UPSERT INTO"));
+                continue;
+            }
+            ++updates;
+            UNIT_ASSERT(write.Statement.Contains("UPDATE "));
+            UNIT_ASSERT(write.Statement.Contains("seqno = $seqno"));
+            UNIT_ASSERT(write.Statement.Contains(" WHERE "));
+            const ui32 assigned = UpdateAssignmentCount(write.Statement);
+            UNIT_ASSERT(assigned >= 2);
+            UNIT_ASSERT(assigned <= 3);
+            if (assigned == 2) {
+                ++twoColumns;
+            } else {
+                ++threeColumns;
+            }
+            ui32 seqnoAssignments = 0;
+            for (const TBoundParam& param : write.Params) {
+                if (param.Name == "seqno") {
+                    ++seqnoAssignments;
+                    UNIT_ASSERT(!param.Optional);
+                    UNIT_ASSERT(!param.Null);
+                }
+            }
+            UNIT_ASSERT_VALUES_EQUAL(seqnoAssignments, 1);
+            if (write.Statement.Contains("UPDATE `/db/replication/pk_bool`")) {
+                sawBoolKey = true;
+                UNIT_ASSERT(write.Statement.Contains("seqno_hash = $"));
+                UNIT_ASSERT(write.Statement.Contains("pk = $"));
+                UNIT_ASSERT(write.Statement.Contains("seq = $"));
             }
         }
-        UNIT_ASSERT(commas <= 2);
-        if (write.Statement.Contains("pk_bool")) {
-            UNIT_ASSERT(write.Statement.Contains("seqno_hash = $"));
-            UNIT_ASSERT(write.Statement.Contains("pk = $"));
-            UNIT_ASSERT(write.Statement.Contains("seq = $"));
-        }
     }
-    UNIT_ASSERT(sawUpdate);
+    UNIT_ASSERT(updates > 0);
+    UNIT_ASSERT(twoColumns > 0);
+    UNIT_ASSERT(threeColumns > 0);
+    UNIT_ASSERT(sawBoolKey);
 }
 
 Y_UNIT_TEST(NullValueIsOptionalAndEmpty) {
