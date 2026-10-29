@@ -318,7 +318,7 @@ Y_UNIT_TEST_SUITE(IncrementalRestoreScan) {
             {
                 const auto& record = *recordPtr;
                 TVector<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords::TRecordInfo> records;
-                records.emplace_back(record.GetOrder(), record.GetPathId(), record.GetBodySize());
+                records.emplace_back(record.GetOrder(), record.GetPathId(), record.GetBody().size());
 
                 auto request = MakeHolder<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords>(records);
                 runtime.Send(new IEventHandle(changeSenderActor, edgeActor, request.Release()));

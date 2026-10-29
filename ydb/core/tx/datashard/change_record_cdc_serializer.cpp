@@ -108,6 +108,12 @@ class TJsonSerializer: public TBaseSerializer {
     friend class TChangeRecord; // used in GetPartitionKey()
 
 protected:
+    static auto ParseBody(const TString& protoBody) {
+        NKikimrChangeExchange::TDataChange body;
+        Y_ENSURE(body.ParseFromArray(protoBody.data(), protoBody.size()));
+        return body;
+    }
+
     static NJson::TJsonValue StringToJson(TStringBuf in) {
         NJson::TJsonValue result;
         Y_ENSURE(NJson::ReadJsonTree(in, &result));
@@ -276,10 +282,7 @@ public:
 
     TString DebugString(const TChangeRecord& record) override {
         NJson::TJsonValue json;
-        // Debug output may be generated before persistence. Parsing a copy keeps
-        // the original serialized body available for the database write.
-        TChangeRecord copy = record;
-        SerializeToJson(json, copy);
+        SerializeToJson(json, record);
 
         if (record.GetLockId()) {
             json["lock"]["id"] = record.GetLockId();
@@ -300,7 +303,7 @@ class TYdbJsonSerializer: public TJsonSerializer {
 protected:
     void SerializeDataChange(NJson::TJsonValue& json, const TChangeRecord& record) {
         Y_ENSURE(record.GetSchema());
-        const auto& body = record.GetDataChange();
+        const auto body = ParseBody(record.GetBody());
 
         if (record.GetKind() == TChangeRecord::EKind::CdcDataChange) {
             SerializeJsonKey(record.GetSchema(), json["key"], body.GetKey());
@@ -535,7 +538,7 @@ protected:
         });
 
         auto& dynamodb = json["dynamodb"];
-        const auto& body = record.GetDataChange();
+        const auto body = ParseBody(record.GetBody());
 
         bool keysOnly = false;
         bool newAndOldImages = false;
@@ -612,7 +615,7 @@ protected:
         Y_ENSURE(record.GetKind() == TChangeRecord::EKind::CdcDataChange);
         Y_ENSURE(record.GetSchema());
 
-        const auto& body = record.GetDataChange();
+        const auto body = ParseBody(record.GetBody());
         auto& keyJson = json["key"];
         auto& valueJson = json["value"];
 
@@ -728,7 +731,7 @@ TString TChangeRecord::GetPartitionKey() const {
     Y_ENSURE(Kind == EKind::CdcDataChange);
     Y_ENSURE(Schema);
 
-    const auto& body = GetDataChange();
+    const auto body = TJsonSerializer::ParseBody(Body);
 
     NJson::TJsonValue key;
     TJsonSerializer::SerializeJsonKey(Schema, key, body.GetKey());

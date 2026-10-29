@@ -34,13 +34,12 @@ class TDataShard::TTxRequestChangeRecords: public TTransactionBase<TDataShard> {
 
                 bodiesSize += record.BodySize;
 
-                // Precharge every record in the batch even if an earlier page is not ready.
                 if (itQueue->second.LockId) {
-                    ok &= db.Table<Schema::LockChangeRecords>().Key(itQueue->second.LockId, itQueue->second.LockOffset).Precharge();
-                    ok &= db.Table<Schema::LockChangeRecordDetails>().Key(itQueue->second.LockId, itQueue->second.LockOffset).Precharge();
+                    ok = ok && db.Table<Schema::LockChangeRecords>().Key(itQueue->second.LockId, itQueue->second.LockOffset).Precharge();
+                    ok = ok && db.Table<Schema::LockChangeRecordDetails>().Key(itQueue->second.LockId, itQueue->second.LockOffset).Precharge();
                 } else {
-                    ok &= db.Table<Schema::ChangeRecords>().Key(record.Order).Precharge();
-                    ok &= db.Table<Schema::ChangeRecordDetails>().Key(record.Order).Precharge();
+                    ok = ok && db.Table<Schema::ChangeRecords>().Key(record.Order).Precharge();
+                    ok = ok && db.Table<Schema::ChangeRecordDetails>().Key(record.Order).Precharge();
                 }
             }
         }

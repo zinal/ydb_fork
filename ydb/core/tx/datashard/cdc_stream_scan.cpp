@@ -370,7 +370,7 @@ public:
                 .Step = record.GetStep(),
                 .TxId = record.GetTxId(),
                 .PathId = record.GetPathId(),
-                .BodySize = record.GetBodySize(),
+                .BodySize = record.GetBody().size(),
                 .TableId = record.GetTableId(),
                 .SchemaVersion = record.GetSchemaVersion(),
             });
