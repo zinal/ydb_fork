@@ -1,0 +1,343 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "datasource",
+          "uid": "grafana"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "target": {
+          "limit": 100,
+          "matchAny": false,
+          "tags": [],
+          "type": "dashboard"
+        },
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Aggregated load of the selected database over the time range selected in the time picker. Each panel is one total. The dashboard has no time series.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "description": "Total number of transactions over the dashboard time range. Sum of the increase of `ydb_table_transaction_total_duration_milliseconds_count` across all nodes and transaction types.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#1f77b4",
+            "mode": "fixed"
+          },
+          "decimals": 0,
+          "displayName": "Transactions",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#1f77b4"
+              }
+            ]
+          },
+          "unit": "none"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(ydb_table_transaction_total_duration_milliseconds_count{database=\"$database\"}[$__range]))",
+          "instant": true,
+          "legendFormat": "Transactions",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Transactions",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "description": "Total processor time spent on database nodes over the dashboard time range, in seconds. Sum of the increase of `utils_ElapsedMicrosec` across all nodes and execution pools, divided by 1 000 000.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#ff7f0e",
+            "mode": "fixed"
+          },
+          "decimals": 2,
+          "displayName": "CPU time",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#ff7f0e"
+              }
+            ]
+          },
+          "unit": "suffix:s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "id": 2,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(utils_ElapsedMicrosec{database=\"$database\"}[$__range])) / 1000000",
+          "instant": true,
+          "legendFormat": "CPU time",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "CPU time",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "description": "Volume written to all topics over the dashboard time range, in decimal megabytes (1 MB = 10^6 bytes). Sum of the increase of `ydb_topic_write_bytes` across all topics and nodes, divided by 1 000 000.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#2ca02c",
+            "mode": "fixed"
+          },
+          "decimals": 2,
+          "displayName": "Topic data written",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#2ca02c"
+              }
+            ]
+          },
+          "unit": "suffix:MB"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "id": 3,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(ydb_topic_write_bytes{database=\"$database\"}[$__range])) / 1000000",
+          "instant": true,
+          "legendFormat": "Topic data written",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Topic data written",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${ds}"
+      },
+      "description": "Volume read from all topics over the dashboard time range, in decimal megabytes (1 MB = 10^6 bytes). Sum of the increase of `ydb_topic_read_bytes` across all topics and nodes, divided by 1 000 000.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "fixedColor": "#9467bd",
+            "mode": "fixed"
+          },
+          "decimals": 2,
+          "displayName": "Topic data read",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "#9467bd"
+              }
+            ]
+          },
+          "unit": "suffix:MB"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "id": 4,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "textMode": "value"
+      },
+      "pluginVersion": "11.6.0",
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${ds}"
+          },
+          "editorMode": "code",
+          "expr": "sum(increase(ydb_topic_read_bytes{database=\"$database\"}[$__range])) / 1000000",
+          "instant": true,
+          "legendFormat": "Topic data read",
+          "range": false,
+          "refId": "A"
+        }
+      ],
+      "title": "Topic data read",
+      "type": "stat"
+    }
+  ],
+  "schemaVersion": 41,
+  "tags": [
+    "ydb"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {},
+        "includeAll": false,
+        "name": "ds",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "type": "datasource"
+      },
+      {
+        "current": {},
+        "datasource": {
+          "type": "prometheus",
+          "uid": "${ds}"
+        },
+        "definition": "label_values(database)",
+        "includeAll": false,
+        "name": "database",
+        "options": [],
+        "query": {
+          "query": "label_values(database)",
+          "refId": "StandardVariableQuery"
+        },
+        "refresh": 1,
+        "regex": "",
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {
+    "nowDelay": "5s"
+  },
+  "timezone": "",
+  "title": "Aggregate load",
+  "uid": "ydb-aggregate-load",
+  "weekStart": ""
+}
