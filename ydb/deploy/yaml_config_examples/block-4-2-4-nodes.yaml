@@ -1,5 +1,23 @@
-# YDB configuration options and their values
-# are described in documentation: https://ydb.tech/en/docs/deploy/configuration/config
+# Reduced block-4-2 on 4 servers.
+#
+# block-4-2 needs 8 fail domains and tolerates 2 of them being down.
+# Each server's disks are split into exactly 2 fail domains via disk_scope,
+# so the loss of one server is the loss of 2 domains and the cluster stays up.
+#
+# ConfigV2 fail_domain_type accepts only rack, body and disk. The value
+# disk_scope is not one of them: it is a ydbd_slice template key. The tool
+# expands it (ydb/tools/cfg/types.py, DistinctionLevels) into the geometry
+# below. disk_scope is mapped at level 50, just after the host unit (level 40,
+# location.body). domain_level_end must be 60 so the label is part of the fail
+# domain. 50 (body) ignores the label; 256 (disk) treats every drive as its
+# own domain and can place more than two VDisks of one group on a single server.
+#
+# The same geometry is required for the static group (self_management_config)
+# and for database storage pools (storage_pool_types). Each host needs its own
+# location.body. The same disk_scope name on different hosts is a different
+# domain, because the host unit is part of the domain. Rack count does not
+# matter. Use exactly two distinct disk_scope values per server; extra disks
+# are added to those two labels, evenly.
 
 metadata:
   kind: MainConfig
@@ -7,19 +25,25 @@ metadata:
   version: 0
 config:
   yaml_config_enabled: true
-  erasure: block-4-2 # erasure is the parameter that describes
-                     # the fault tolerance mode of the cluster.
-                     # See docs for more details https://ydb.tech/en/docs/deploy/configuration/config#domains-blob
-  fail_domain_type: disk_scope
-  self_management_config: # automatic management of static resources (static group, state storage, etc)
+  erasure: block-4-2
+  self_management_config:
     enabled: true
-  default_disk_type: SSD # default disk type used for group creation of both kinds
-  host_configs: # the list of available host configurations in the cluster.
+    # Same boundaries ydbd_slice writes for fail_domain_type: disk_scope.
+    geometry: &disk_scope_geometry
+      realm_level_begin: 10
+      realm_level_end: 20
+      domain_level_begin: 10
+      domain_level_end: 60
+      num_fail_realms: 1
+      num_fail_domains_per_fail_realm: 8
+      num_vdisks_per_fail_domain: 1
+  default_disk_type: SSD
+  host_configs:
   - host_config_id: 1
     drive:
-    - path: /dev/disk/by-partlabel/ydb_disk_ssd_01    # path of the first disk in the host configuration.
-      type: SSD                                       # kind of the disk: available kinds are SSD, NVME, HDD
-      disk_scope: fail-domain-1                       # label to calculate fail domains for storage groups mapping
+    - path: /dev/disk/by-partlabel/ydb_disk_ssd_01
+      type: SSD
+      disk_scope: fail-domain-1
     - path: /dev/disk/by-partlabel/ydb_disk_ssd_02
       type: SSD
       disk_scope: fail-domain-1
@@ -29,37 +53,47 @@ config:
     - path: /dev/disk/by-partlabel/ydb_disk_ssd_04
       type: SSD
       disk_scope: fail-domain-2
+      # Two disks per label is the example layout. One disk per label is enough.
+      # A third distinct disk_scope on the same server is not: one server would
+      # then take down more than two fail domains.
   hosts:
-  - host: ydb-node-zone-a-1.local     # storage node DNS name
-    host_config_id: 1                 # numeric host configuration template identifier
-    location:                         # this parameter describes where host is located.
-      body: 1                         # string representing a host serial number.
-      data_center: 'zone-a'           # string representing the datacenter / availability zone where the host is located.
-                                      # if cluster is deployed using mirror-3-dc fault tolerance mode, all hosts must be distributed
-                                      # across 3 datacenters.
-      rack: '1'                       # string representing a rack identifier where the host is located.
-                                      # if cluster is deployed using block-4-2 erasure, all hosts should be distributed
-                                      # across at least 8 racks.
-  - host: ydb-node-zone-a-2.local
+  - host: ydb-node-1.local
+    host_config_id: 1
+    location:
+      body: 1
+      data_center: 'zone-a'
+      rack: '1'
+  - host: ydb-node-2.local
     host_config_id: 1
     location:
       body: 2
       data_center: 'zone-a'
-      rack: '2'
-  - host: ydb-node-zone-a-3.local
+      rack: '1'
+  - host: ydb-node-3.local
     host_config_id: 1
     location:
       body: 3
       data_center: 'zone-a'
-      rack: '3'
-  - host: ydb-node-zone-a-4.local
+      rack: '1'
+  - host: ydb-node-4.local
     host_config_id: 1
     location:
       body: 4
       data_center: 'zone-a'
-      rack: '4'
-  actor_system_config:          # the configuration of the actor system which describes how cores of the instance are distributed
-    use_auto_config: true       # across different types of workloads in the instance.
+      rack: '1'
+  storage_pool_types:
+  - kind: ssd
+    pool_config:
+      box_id: 1
+      erasure_species: block-4-2
+      kind: ssd
+      vdisk_kind: Default
+      geometry: *disk_scope_geometry
+      pdisk_filter:
+      - property:
+        - type: SSD
+  actor_system_config:
+    use_auto_config: true
     cpu_count: 8
   interconnect_config:
     start_tcp: true

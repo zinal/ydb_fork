@@ -561,4 +561,135 @@ hosts:
         UNIT_ASSERT_VALUES_EQUAL(domain.GetStoragePoolTypes(1).GetKind(), "ssd");
         UNIT_ASSERT_VALUES_EQUAL(domain.GetStoragePoolTypes(1).GetPoolConfig().GetKind(), "ssd");
     }
+
+    void AssertDiskScopeGeometry(const NKikimrBlobStorage::TGroupGeometry& geometry) {
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetRealmLevelBegin(), 10);
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetRealmLevelEnd(), 20);
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetDomainLevelBegin(), 10);
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetDomainLevelEnd(), 60);
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetNumFailRealms(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetNumFailDomainsPerFailRealm(), 8);
+        UNIT_ASSERT_VALUES_EQUAL(geometry.GetNumVDisksPerFailDomain(), 1);
+    }
+
+    // Reduced block-4-2. fail_domain_type has no disk_scope value; ydbd_slice
+    // expands that template key into domain_level_end 60. The static group and
+    // database pools must both use it, and drives must keep their labels.
+    Y_UNIT_TEST(Block42FourNodesDiskScope) {
+        TString config = R"(
+metadata:
+  kind: MainConfig
+  cluster: ""
+  version: 0
+config:
+  erasure: block-4-2
+  default_disk_type: SSD
+  self_management_config:
+    enabled: true
+    geometry: &disk_scope_geometry
+      realm_level_begin: 10
+      realm_level_end: 20
+      domain_level_begin: 10
+      domain_level_end: 60
+      num_fail_realms: 1
+      num_fail_domains_per_fail_realm: 8
+      num_vdisks_per_fail_domain: 1
+  host_configs:
+  - host_config_id: 1
+    drive:
+    - path: /dev/disk/by-partlabel/ydb_disk_ssd_01
+      type: SSD
+      disk_scope: fail-domain-1
+    - path: /dev/disk/by-partlabel/ydb_disk_ssd_02
+      type: SSD
+      disk_scope: fail-domain-2
+  hosts:
+  - host: ydb-node-1.local
+    host_config_id: 1
+    location:
+      body: 1
+      data_center: zone-a
+      rack: '1'
+  - host: ydb-node-2.local
+    host_config_id: 1
+    location:
+      body: 2
+      data_center: zone-a
+      rack: '1'
+  - host: ydb-node-3.local
+    host_config_id: 1
+    location:
+      body: 3
+      data_center: zone-a
+      rack: '1'
+  - host: ydb-node-4.local
+    host_config_id: 1
+    location:
+      body: 4
+      data_center: zone-a
+      rack: '1'
+  storage_pool_types:
+  - kind: ssd
+    pool_config:
+      box_id: 1
+      erasure_species: block-4-2
+      kind: ssd
+      vdisk_kind: Default
+      geometry: *disk_scope_geometry
+      pdisk_filter:
+      - property:
+        - type: SSD
+)";
+        NKikimrConfig::TAppConfig cfg = Parse(config, true);
+
+        const auto& selfManagement = cfg.GetSelfManagementConfig();
+        UNIT_ASSERT(selfManagement.GetEnabled());
+        UNIT_ASSERT_VALUES_EQUAL(selfManagement.GetErasureSpecies(), "block-4-2");
+        UNIT_ASSERT(selfManagement.HasGeometry());
+        AssertDiskScopeGeometry(selfManagement.GetGeometry());
+        UNIT_ASSERT_VALUES_EQUAL(selfManagement.PDiskFilterSize(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(selfManagement.GetPDiskFilter(0).GetProperty(0).GetType(),
+            NKikimrBlobStorage::EPDiskType::SSD);
+
+        UNIT_ASSERT_VALUES_EQUAL(cfg.GetDomainsConfig().DomainSize(), 1);
+        const auto& pool = cfg.GetDomainsConfig().GetDomain(0).GetStoragePoolTypes(0);
+        UNIT_ASSERT_VALUES_EQUAL(pool.GetKind(), "ssd");
+        UNIT_ASSERT_VALUES_EQUAL(pool.GetPoolConfig().GetErasureSpecies(), "block-4-2");
+        AssertDiskScopeGeometry(pool.GetPoolConfig().GetGeometry());
+        UNIT_ASSERT_VALUES_EQUAL(pool.GetPoolConfig().GetPDiskFilter(0).GetProperty(0).GetType(),
+            NKikimrBlobStorage::EPDiskType::SSD);
+
+        const auto& hostConfig = cfg.GetBlobStorageConfig().GetDefineHostConfig(0);
+        UNIT_ASSERT_VALUES_EQUAL(hostConfig.DriveSize(), 2);
+        UNIT_ASSERT_VALUES_EQUAL(hostConfig.GetDrive(0).GetDiskScope(), "fail-domain-1");
+        UNIT_ASSERT_VALUES_EQUAL(hostConfig.GetDrive(1).GetDiskScope(), "fail-domain-2");
+        UNIT_ASSERT_VALUES_EQUAL(cfg.GetBlobStorageConfig().GetDefineBox().HostSize(), 4);
+    }
+
+    Y_UNIT_TEST(DiskScopeIsNotAFailDomainType) {
+        TString config = R"(
+metadata:
+  kind: MainConfig
+  cluster: ""
+  version: 0
+config:
+  erasure: block-4-2
+  fail_domain_type: disk_scope
+  self_management_config:
+    enabled: true
+  default_disk_type: SSD
+  host_configs:
+  - host_config_id: 1
+    drive:
+    - path: /dev/disk/by-partlabel/ydb_disk_ssd_01
+      type: SSD
+      disk_scope: fail-domain-1
+  hosts:
+  - host: ydb-node-1.local
+    host_config_id: 1
+  - host: ydb-node-2.local
+    host_config_id: 1
+)";
+        UNIT_CHECK_GENERATED_EXCEPTION(Parse(config, true), yexception);
+    }
 }
