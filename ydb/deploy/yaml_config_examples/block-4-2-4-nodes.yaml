@@ -26,6 +26,8 @@ metadata:
 config:
   yaml_config_enabled: true
   erasure: block-4-2
+  # Scheme root. The full name of table1 in database db1 is /Root/db1/table1.
+  domain_name: Root
   self_management_config:
     enabled: true
     # Same boundaries ydbd_slice writes for fail_domain_type: disk_scope.

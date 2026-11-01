@@ -96,6 +96,7 @@ metadata:
   version: 0
 config:
   erasure: block-4-2
+  domain_name: Root
   default_disk_type: SSD
   self_management_config:
     enabled: true

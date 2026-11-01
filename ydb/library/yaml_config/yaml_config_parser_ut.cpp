@@ -583,6 +583,7 @@ metadata:
   version: 0
 config:
   erasure: block-4-2
+  domain_name: Root
   default_disk_type: SSD
   self_management_config:
     enabled: true
@@ -652,6 +653,7 @@ config:
             NKikimrBlobStorage::EPDiskType::SSD);
 
         UNIT_ASSERT_VALUES_EQUAL(cfg.GetDomainsConfig().DomainSize(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(cfg.GetDomainsConfig().GetDomain(0).GetName(), "Root");
         const auto& pool = cfg.GetDomainsConfig().GetDomain(0).GetStoragePoolTypes(0);
         UNIT_ASSERT_VALUES_EQUAL(pool.GetKind(), "ssd");
         UNIT_ASSERT_VALUES_EQUAL(pool.GetPoolConfig().GetErasureSpecies(), "block-4-2");
