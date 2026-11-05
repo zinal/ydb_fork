@@ -38,13 +38,13 @@ Tables are divided into ordinary tables and wide tables. An ordinary table holds
 
 ### Row number {#row-number}
 
-Every row of a table has a number `n`, an integer starting at 0. After `import` the table holds numbers `0 .. Q-1`. `run` appends the following numbers. The primary key is fixed at insert. On every table except `pk_bool` and `pk_decimal_narrow` it is computed from `n`, and different numbers produce different keys. On those two tables the first component is the hash of the `seqno` written by the insert, and `seq` equals `n`, so different numbers produce different keys there as well.
+Every row of a table has a number `n`, an integer starting at 0. After `import` the table holds numbers `0 .. Q-1`. `run` appends the following numbers. The primary key is fixed at insert. On every table except `pk_bool` and `pk_decimal_narrow` it is computed from `n`, and different numbers produce different keys. On those two tables the first component is the hash of the pair `(pk, seq)`, and `seq` equals `n`, so different numbers produce different keys there as well.
 
 ### seqno column {#seqno}
 
 Every table has a column `seqno Uint64 NOT NULL`. It is not part of the primary key. The `seq` column of a composite key stores the row number `n`. `seqno` is the operation number, shared by every table of one transaction. `seqno` is not among the fields that can be written as `NULL`.
 
-Rows that one transaction inserts or updates store this number in `seqno`. `seqno_hash` is computed from the same operation number.
+Rows that one transaction inserts or updates store this number in `seqno`.
 
 The number comes from an atomic counter in the command process. The counter advances when the transaction is formed. A retry of that transaction keeps the same number.
 
@@ -58,18 +58,25 @@ When a type has fewer than 2^32 distinct values, one column of that type is not 
 
 The narrow types are `Bool` (2 values), `Int8` and `Uint8` (256), `Int16` and `Uint16` (65536), `Date` (days from 1970-01-01 through 2105-12-31, 49673 values), and `Decimal(1, 0)` (values from −9 to 9).
 
-For `Bool` and `Decimal(1, 0)` the key is preceded by `seqno_hash Uint64 NOT NULL`. The primary key of these two tables is `(seqno_hash, pk <type>, seq Uint64)`. `seqno_hash` is the hash of the `seqno` of the transaction that inserted the row. `pk` is derived from `n % <domain size>`, and `seq` equals `n`.
+For `Bool` and `Decimal(1, 0)` the key is preceded by `pk_seq_hash Uint64 NOT NULL`. The primary key of these two tables is `(pk_seq_hash, pk <type>, seq Uint64)`. `pk_seq_hash` is the hash of the pair `(pk, seq)`. `pk` is derived from `n % <domain size>`, and `seq` equals `n`.
 
-The hash is computed in unsigned 64-bit arithmetic. Addition and multiplication wrap modulo 2^64, and the right shift is logical:
+The hash is computed in unsigned 64-bit arithmetic. Addition and multiplication wrap modulo 2^64, and the right shift is logical. One number is mixed as follows:
 
 ```
-x = seqno + 0x9e3779b97f4a7c15
-x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
-x = (x ^ (x >> 27)) * 0x94d049bb133111eb
-seqno_hash = x ^ (x >> 31)
+mix(v):
+    x = v + 0x9e3779b97f4a7c15
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9
+    x = (x ^ (x >> 27)) * 0x94d049bb133111eb
+    mix = x ^ (x >> 31)
 ```
 
-`import` writes `seqno` equal to 0, so every initially loaded row of `pk_bool` and `pk_decimal_narrow` has the same `seqno_hash`, the hash of zero. Each new `run` transaction receives its own `seqno`, and inserts of that transaction into these two tables receive the hash of that `seqno`. A later write to the `seqno` column keeps `seqno_hash` equal to the hash from the insert. The `WHERE` clause of an update compares this stored hash. At the start of `run` the command reads `SELECT seq, seqno_hash` and remembers the hash of every number already written. A successful insert of the same run adds the hash of its `seqno` for the new numbers to that memory. The `seqno_hash` column is not part of a secondary index.
+For `Bool`, the number `pk` is 0 when the key is false and 1 when the key is true. For `Decimal(1, 0)` it is the key value from −9 to 9, stored as an unsigned 64-bit two's complement. `seq` is the row number `n`. `xor` is bitwise exclusive or:
+
+```
+pk_seq_hash = mix(mix(pk) xor seq)
+```
+
+A later write to `seqno` leaves `pk_seq_hash` equal to the hash of the same pair `(pk, seq)`. The `WHERE` clause of an update computes this hash again from `pk` and `seq`. The `pk_seq_hash` column is not part of a secondary index.
 
 The other key types are stored in a single column. In ordinary tables it is named `pk`; in wide tables it is named `id`. The value is a reversible mix of the number `n` over the legal range of the type, so consecutive numbers land in different parts of the key order.
 
@@ -107,19 +114,19 @@ A table with a composite key has these columns:
 | `c_date32` | `Date32` | |
 | `c_interval64` | `Interval64` | |
 
-On `pk_bool` and `pk_decimal_narrow` the column `seqno_hash Uint64 NOT NULL` precedes `pk`. It is part of the primary key and is filled with the hash of the insert `seqno`.
+On `pk_bool` and `pk_decimal_narrow` the column `pk_seq_hash Uint64 NOT NULL` precedes `pk`. It is part of the primary key and is filled with the hash of the pair `(pk, seq)`.
 
 The table-to-key mapping:
 
 | Table | Primary key | Key of number `n` |
 | --- | --- | --- |
-| `pk_bool` | `(seqno_hash Uint64, pk Bool, seq Uint64)` | `seqno_hash` is the hash of the insert `seqno`, `pk = (n % 2 = 1)`, `seq = n` |
+| `pk_bool` | `(pk_seq_hash Uint64, pk Bool, seq Uint64)` | `pk_seq_hash = mix(mix(pk) xor seq)`, `pk = (n % 2 = 1)`, `seq = n` |
 | `pk_int8` | `(pk Int8, seq Uint64)` | `pk = (n % 256) − 128`, `seq = n` |
 | `pk_uint8` | `(pk Uint8, seq Uint64)` | `pk = n % 256`, `seq = n` |
 | `pk_int16` | `(pk Int16, seq Uint64)` | `pk` is the signed 16-bit representation of `n % 65536`, `seq = n` |
 | `pk_uint16` | `(pk Uint16, seq Uint64)` | `pk = n % 65536`, `seq = n` |
 | `pk_date` | `(pk Date, seq Uint64)` | `pk` cycles through every valid `Date`, `seq = n` |
-| `pk_decimal_narrow` | `(seqno_hash Uint64, pk Decimal(1, 0), seq Uint64)` | `seqno_hash` is the hash of the insert `seqno`, `pk = (n % 19) − 9`, `seq = n` |
+| `pk_decimal_narrow` | `(pk_seq_hash Uint64, pk Decimal(1, 0), seq Uint64)` | `pk_seq_hash = mix(mix(pk) xor seq)`, `pk = (n % 19) − 9`, `seq = n` |
 | `pk_int32` | `(pk Int32)` | the 32-bit reversal of `n`, read as signed |
 | `pk_int64` | `(pk Int64)` | the 64-bit reversal of `n`, read as signed |
 | `pk_uint32` | `(pk Uint32)` | the 32-bit reversal of `n` |
@@ -164,7 +171,7 @@ The number has to be less than `span`. The multipliers for these ranges:
 | `Interval64` | −9223339708799999999 | 9223339708799999999 | 3 |
 | integer part of `Decimal(22, 9)` | 0 | `10^13 − 1` | 3 |
 
-For `Uuid`, the high 8 bytes are the same hash as `seqno_hash`, computed from the number `n` and stored big-endian. The low 8 bytes are the number `n` in big-endian.
+For `Uuid`, the high 8 bytes are `mix(n)` stored big-endian. The low 8 bytes are the number `n` in big-endian.
 
 ### Wide tables {#wide-tables}
 
@@ -272,7 +279,7 @@ If the minimum is greater than the maximum, `init` fails with a parameter error 
 
 ## Initial fill {#import}
 
-`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every row has `seqno` equal to 0. With probability 10%, one other value field stays `NULL`. On `pk_bool` and `pk_decimal_narrow` the `seqno_hash` column equals the hash of zero.
+`import` inserts rows numbered `0 .. Q−1` into every table. The row key is computed from the table above. Every row has `seqno` equal to 0. With probability 10%, one other value field stays `NULL`. On `pk_bool` and `pk_decimal_narrow` the `pk_seq_hash` column equals `mix(mix(pk) xor seq)` of that row.
 
 Rows are written in batches. One batch holds at most `--batch-size` rows, 100 by default. The last batch of a table is shorter when Q is not divisible by that size. A batch is one query:
 
@@ -308,14 +315,6 @@ SELECT seq FROM `<table>` ORDER BY seq DESC LIMIT 1
 
 The returned `seq` is the maximum number. An empty result means an empty table and no boundary.
 
-For `pk_bool` and `pk_decimal_narrow` the command also reads the insert hash:
-
-```sql
-SELECT seq, seqno_hash FROM `<table>`
-```
-
-An update of a row uses the `seqno_hash` from this read. A row written by `import` has the hash of zero.
-
 For the other tables the key is a mix or a hash of the number. The number of rows already written equals the count of numbers `0 .. boundary`, so the boundary is read as follows:
 
 ```sql
@@ -344,7 +343,7 @@ The number of affected tables **M** is chosen uniformly from 1 to the number of 
 
 The transaction writes **R** rows into every selected table. R is chosen uniformly from 1 to **K** inclusive. K is the `--max-records` parameter. Of these R rows, `floor(R / 2)` are planned as inserts and the rest as updates. R = 1 yields one update. R = 2 yields one insert and one update. When fewer rows exist than updates were planned, the missing updates are performed as inserts. In an empty table all R rows are inserts.
 
-An insert fills every column and is performed with `UPSERT`. With probability 10%, one random value field of that row, other than `seqno`, is `NULL`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. With probability 1%, one of these assigned values, other than `seqno`, is `NULL`. When the set contains only `seqno`, no empty value is written. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `seqno_hash`, `pk`, and `seq`. The `seqno_hash` value is the hash written when the row was inserted.
+An insert fills every column and is performed with `UPSERT`. With probability 10%, one random value field of that row, other than `seqno`, is `NULL`. Each updated row is changed with `UPDATE`, which assigns new values to 1, 2, or 3 columns of that row. The number of columns is chosen uniformly. The set always includes `seqno` with the operation number of this transaction; the remaining places are random value columns that are not part of the primary key. With probability 1%, one of these assigned values, other than `seqno`, is `NULL`. When the set contains only `seqno`, no empty value is written. The `WHERE` clause contains every primary-key column and compares it for equality. For a single-column key this is `pk`, and in a wide table it is `id`. For `pk_int8`, `pk_uint8`, `pk_int16`, `pk_uint16`, and `pk_date` this is `pk` and `seq`. For `pk_bool` and `pk_decimal_narrow` this is `pk_seq_hash`, `pk`, and `seq`. The `pk_seq_hash` value is `mix(mix(pk) xor seq)`.
 
 Each statement is sent as its own query inside one interactive serializable transaction. The first query opens the transaction, the following queries continue it, and the last query commits it by setting the commit flag. The whole attempt runs in the SDK retry handler with the idempotent flag set. The status of the query is returned to that handler. When the status is retriable, the handler runs the whole attempt again.
 
