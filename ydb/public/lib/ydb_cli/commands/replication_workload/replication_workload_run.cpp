@@ -419,9 +419,12 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
     PrepareTpchText();
     TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, timeout, seed, config.IsVerbose());
     runner.Load(timeout);
+    // The measured phase starts after this pause, once the boundary is loaded.
+    Sleep(TDuration::Seconds(30));
     runner.SetSeqno(static_cast<ui64>(TInstant::Now().MicroSeconds()));
 
     const TInstant start = TInstant::Now();
+    Cout << "run_started=" << start.ToIsoStringLocalUpToSeconds() << Endl;
     const TInstant stop = start + TDuration::Seconds(Seconds);
     std::thread worker([&runner, stop] { runner.RunUntil(stop); });
     TInstant next = start + TDuration::Seconds(WindowSec);
@@ -439,8 +442,10 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
     }
     runner.Stop();
     worker.join();
-    const double elapsed = static_cast<double>((TInstant::Now() - start).MicroSeconds()) / 1000000.0;
+    const TInstant finish = TInstant::Now();
+    const double elapsed = static_cast<double>((finish - start).MicroSeconds()) / 1000000.0;
     PrintStats(elapsed, elapsed, runner.Success(), runner.Errors());
+    Cout << "run_finished=" << finish.ToIsoStringLocalUpToSeconds() << Endl;
     return EXIT_SUCCESS;
 }
 
