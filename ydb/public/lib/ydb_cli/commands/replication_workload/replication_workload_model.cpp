@@ -49,11 +49,11 @@ TVector<TColumn> SingleColumns(EColType pkType) {
     };
 }
 
-TVector<TColumn> CompositeColumns(EColType pkType, bool seqnoHashPrefix) {
+TVector<TColumn> CompositeColumns(EColType pkType, bool pkSeqHashPrefix) {
     TVector<TColumn> columns;
-    if (seqnoHashPrefix) {
+    if (pkSeqHashPrefix) {
         // First key column. Its value is HashPkSeq(pk, seq), so a later UPDATE rebuilds it.
-        columns.push_back(Col("seqno_hash", EColType::Uint64, EFill::None, true));
+        columns.push_back(Col("pk_seq_hash", EColType::Uint64, EFill::None, true));
     }
     columns.push_back(Col("pk", pkType, EFill::None, true));
     columns.push_back(Col("seq", EColType::Uint64, EFill::None, true));
@@ -106,14 +106,14 @@ TVector<TColumn> WideColumns(EColType textType) {
     return columns;
 }
 
-TTable MakeOrdinary(const char* name, EKeyKind key, EColType pkType, bool composite, bool hash, bool seqnoHashPrefix = false) {
+TTable MakeOrdinary(const char* name, EKeyKind key, EColType pkType, bool composite, bool hash, bool pkSeqHashPrefix = false) {
     TTable table;
     table.Name = name;
     table.Key = key;
     table.Composite = composite;
     table.HashKey = hash;
-    table.SeqnoHashPrefix = seqnoHashPrefix;
-    table.Columns = composite ? CompositeColumns(pkType, seqnoHashPrefix) : SingleColumns(pkType);
+    table.PkSeqHashPrefix = pkSeqHashPrefix;
+    table.Columns = composite ? CompositeColumns(pkType, pkSeqHashPrefix) : SingleColumns(pkType);
     return table;
 }
 
@@ -683,7 +683,7 @@ ui64 PkSeqBits(const TBoundParam& pk) {
         case EParamKind::Decimal:
             return static_cast<ui64>(FromString<i64>(pk.Text));
         default:
-            ythrow yexception() << "seqno_hash prefix requires a Bool or Decimal(1, 0) key";
+            ythrow yexception() << "pk_seq_hash prefix requires a Bool or Decimal(1, 0) key";
     }
 }
 
@@ -866,9 +866,9 @@ TBoundParam MakeValue(const TColumn& column, std::mt19937_64& rng) {
 TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, const TString& namePrefix) {
     TBoundParam pk = KeyParam(table, n, namePrefix + PkColumn(table).Name);
     TVector<TBoundParam> params;
-    if (table.SeqnoHashPrefix) {
+    if (table.PkSeqHashPrefix) {
         TBoundParam hash;
-        hash.Name = namePrefix + "seqno_hash";
+        hash.Name = namePrefix + "pk_seq_hash";
         hash.SqlType = "Uint64";
         hash.Kind = EParamKind::Uint64;
         hash.U = HashPkSeq(PkSeqBits(pk), n);

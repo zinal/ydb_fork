@@ -48,10 +48,10 @@ Y_UNIT_TEST(TableShapes) {
             UNIT_ASSERT_VALUES_EQUAL(table.Columns[31].Name, "c_wide");
             UNIT_ASSERT(table.Columns[30].Fill == EFill::Medium);
             UNIT_ASSERT(table.Columns[31].Fill == EFill::Wide);
-        } else if (table.SeqnoHashPrefix) {
+        } else if (table.PkSeqHashPrefix) {
             ++ordinary;
             UNIT_ASSERT_VALUES_EQUAL(table.Columns.size(), 11);
-            UNIT_ASSERT_VALUES_EQUAL(table.Columns[0].Name, "seqno_hash");
+            UNIT_ASSERT_VALUES_EQUAL(table.Columns[0].Name, "pk_seq_hash");
             UNIT_ASSERT(table.Columns[0].Key);
         } else {
             ++ordinary;
@@ -59,7 +59,7 @@ Y_UNIT_TEST(TableShapes) {
         }
         if (table.Composite) {
             ++composite;
-            UNIT_ASSERT(table.Columns[table.SeqnoHashPrefix ? 2 : 1].Name == "seq");
+            UNIT_ASSERT(table.Columns[table.PkSeqHashPrefix ? 2 : 1].Name == "seq");
         }
         bool hasSeqno = false;
         for (const TColumn& column : table.Columns) {
@@ -82,8 +82,8 @@ Y_UNIT_TEST(IndexesAndPartitions) {
     const TString narrowDdl = CreateTableQuery("/db/replication/pk_bool", *narrow, 3, 4);
     UNIT_ASSERT(narrowDdl.Contains("INDEX seqno_idx GLOBAL SYNC ON (seqno)"));
     UNIT_ASSERT(narrowDdl.Contains("INDEX seq_idx GLOBAL SYNC ON (seq)"));
-    UNIT_ASSERT(narrowDdl.Contains("PRIMARY KEY (seqno_hash, pk, seq)"));
-    UNIT_ASSERT(narrowDdl.Contains("seqno_hash Uint64 NOT NULL"));
+    UNIT_ASSERT(narrowDdl.Contains("PRIMARY KEY (pk_seq_hash, pk, seq)"));
+    UNIT_ASSERT(narrowDdl.Contains("pk_seq_hash Uint64 NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("pk Bool NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("seq Uint64 NOT NULL"));
     UNIT_ASSERT(narrowDdl.Contains("seqno Uint64 NOT NULL"));
@@ -168,7 +168,7 @@ Y_UNIT_TEST(KeysAndText) {
     }
 }
 
-Y_UNIT_TEST(SeqnoHashFollowsPkAndSeq) {
+Y_UNIT_TEST(PkSeqHashFollowsPkAndSeq) {
     const TTable* boolean = Find("pk_bool");
     const TTable* decimal = Find("pk_decimal_narrow");
     UNIT_ASSERT(boolean && decimal);
@@ -187,8 +187,8 @@ Y_UNIT_TEST(SeqnoHashFollowsPkAndSeq) {
     std::mt19937_64 rightRng(1);
     const TRowWrite inserted = MakeInsertWrite(*boolean, "/db/replication/pk_bool", 5, 0, leftRng);
     const TRowWrite rewritten = MakeInsertWrite(*boolean, "/db/replication/pk_bool", 5, 42, rightRng);
-    const TBoundParam* insertedHash = FindParam(inserted.Params, "seqno_hash");
-    const TBoundParam* rewrittenHash = FindParam(rewritten.Params, "seqno_hash");
+    const TBoundParam* insertedHash = FindParam(inserted.Params, "pk_seq_hash");
+    const TBoundParam* rewrittenHash = FindParam(rewritten.Params, "pk_seq_hash");
     const TBoundParam* insertedSeqno = FindParam(inserted.Params, "seqno");
     const TBoundParam* rewrittenSeqno = FindParam(rewritten.Params, "seqno");
     UNIT_ASSERT(insertedHash && rewrittenHash && insertedSeqno && rewrittenSeqno);
@@ -210,7 +210,7 @@ Y_UNIT_TEST(SeqnoHashFollowsPkAndSeq) {
             if (!write.Update) {
                 continue;
             }
-            const TBoundParam* hash = FindParam(write.Params, "seqno_hash");
+            const TBoundParam* hash = FindParam(write.Params, "pk_seq_hash");
             if (hash == nullptr) {
                 continue;
             }
@@ -239,8 +239,8 @@ Y_UNIT_TEST(ImportBatchUsesAsTable) {
     UNIT_ASSERT(wide);
     const TString query = ImportQuery("/db/replication/pk_bool", *boolean);
     UNIT_ASSERT(query.Contains("DECLARE $input AS List<Struct<"));
-    UNIT_ASSERT(query.Contains("seqno_hash: Uint64"));
-    UNIT_ASSERT(!query.Contains("seqno_hash: Uint64?"));
+    UNIT_ASSERT(query.Contains("pk_seq_hash: Uint64"));
+    UNIT_ASSERT(!query.Contains("pk_seq_hash: Uint64?"));
     UNIT_ASSERT(query.Contains("pk: Bool"));
     UNIT_ASSERT(!query.Contains("pk: Bool?"));
     UNIT_ASSERT(query.Contains("seqno: Uint64"));
@@ -280,7 +280,7 @@ Y_UNIT_TEST(ImportBatchUsesAsTable) {
     UNIT_ASSERT(value);
     const TString type = FormatType(value->GetType());
     UNIT_ASSERT(type.Contains("List<Struct<"));
-    UNIT_ASSERT(type.Contains("seqno_hash"));
+    UNIT_ASSERT(type.Contains("pk_seq_hash"));
     TValueParser parser(*value);
     parser.OpenList();
     ui32 items = 0;
@@ -351,7 +351,7 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
             UNIT_ASSERT_VALUES_EQUAL(seqnoAssignments, 1);
             if (write.Statement.Contains("UPDATE `/db/replication/pk_bool`")) {
                 sawBoolKey = true;
-                UNIT_ASSERT(write.Statement.Contains("seqno_hash = $"));
+                UNIT_ASSERT(write.Statement.Contains("pk_seq_hash = $"));
                 UNIT_ASSERT(write.Statement.Contains("pk = $"));
                 UNIT_ASSERT(write.Statement.Contains("seq = $"));
             }
@@ -447,7 +447,7 @@ Y_UNIT_TEST(UpdateNullsOneAssignedValue) {
         for (const TRowWrite& write : plan.Writes) {
             ui32 nulls = 0;
             for (const TBoundParam& param : write.Params) {
-                if (param.Name.EndsWith("seqno") && !param.Name.EndsWith("seqno_hash")) {
+                if (param.Name.EndsWith("seqno")) {
                     UNIT_ASSERT(!param.Optional);
                     UNIT_ASSERT(!param.Null);
                 }

@@ -98,7 +98,7 @@ struct TTable {
     EKeyKind Key = EKeyKind::Uint64;
     bool Composite = false;
     bool HashKey = false;
-    bool SeqnoHashPrefix = false;
+    bool PkSeqHashPrefix = false;
     bool Wide = false;
     ETextType WideText = ETextType::None;
     TVector<TColumn> Columns;
