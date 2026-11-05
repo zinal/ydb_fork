@@ -1,3 +1,4 @@
+* Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests.
 * Added `--expected-generation` option to `ydb admin cluster bridge update` to apply a cluster state update only if the cluster state still has the given generation.
 * Added `ydb admin cluster bridge set-database-mode` to enable or disable bridge mode for the database selected with `--target-database`. Use `bridged` or `ordinary` as the required mode argument, and optionally `--retain-pile` with `ordinary`.
 * Added `ydb admin cluster bridge destroy-pile` command to destroy a DISCONNECTED pile along with all its data (asks for confirmation unless `-y` is given).
@@ -12,7 +13,6 @@
 * Added recursive removal of Solomon (KeyValue) volumes, resource pools, and backup collections in `ydb scheme rmdir --recursive`.
 * Fixed `ydb scheme rmdir --recursive` skipping directories whose names start with `~`.
 * Fixed `ydb tools dump` and `ydb tools restore` skipping user directories whose names start with `~`; temporary directories starting with `~backup_` or `export-` remain excluded.
-* Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests.
 
 ## 2.34.0 ##
 
