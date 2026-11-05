@@ -293,6 +293,14 @@ Struct fields have the same names as the table columns and follow the same order
 
 Batches of one table are sent one after another. Different tables are processed at the same time. `--threads` sets the thread count; by default it is the number of vCPUs on the current host. The number of tables in progress at once is the smaller of the thread count and the number of tables in the directory.
 
+While rows are being written, a progress line is printed to standard output every 30 seconds. When writing stops, a total in the same form is printed if at least one second has passed since the previous line. `rows` is the number of rows in batches that have committed. `rows_total` is Q multiplied by the number of tables. `rows_per_s` is the average rate since writing started. `tables_done` is the number of tables that have received all Q rows. A batch that did not commit is left out of `rows`, and its table does not increase `tables_done`.
+
+```text
+elapsed_s=30.0 rows=12000 rows_total=28000 rows_per_s=400.0 tables_done=4 tables=28
+```
+
+With Q = 0 no progress line is printed.
+
 The command finishes after every batch is committed. The batch size belongs to `import` only and does not change the size of `run` transactions.
 
 A repeated `import` when rows are already present fails the command and does not rewrite the table. The working order is one `import` after `init`.
