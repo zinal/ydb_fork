@@ -1,3 +1,4 @@
+* Added `ydb workload replication compile`. It compiles every UPSERT and UPDATE statement that `ydb workload replication run` can send, on each node returned by Discovery, and prints progress.
 * Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests.
 * Added `--expected-generation` option to `ydb admin cluster bridge update` to apply a cluster state update only if the cluster state still has the given generation.
 * Added `ydb admin cluster bridge set-database-mode` to enable or disable bridge mode for the database selected with `--target-database`. Use `bridged` or `ordinary` as the required mode argument, and optionally `--retain-pile` with `ordinary`.

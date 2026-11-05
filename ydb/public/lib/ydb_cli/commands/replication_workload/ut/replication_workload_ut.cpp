@@ -5,6 +5,7 @@
 
 #include <library/cpp/testing/unittest/registar.h>
 
+#include <util/generic/hash_set.h>
 #include <util/string/cast.h>
 
 #include <random>
@@ -558,6 +559,103 @@ Y_UNIT_TEST(StatementsStayStable) {
     }
     UNIT_ASSERT(sawMultiInsert);
     UNIT_ASSERT(repeated >= 1);
+}
+
+ui64 Choose(ui64 n, ui64 k) {
+    ui64 result = 1;
+    for (ui64 i = 1; i <= k; ++i) {
+        result = result * (n - k + i) / i;
+    }
+    return result;
+}
+
+Y_UNIT_TEST(RunQueriesMatchRun) {
+    const TVector<TRunQuery> queries = RunQueries("/db/replication");
+    THashSet<TString> names;
+    THashSet<TString> texts;
+    ui64 upserts = 0;
+    for (const TRunQuery& query : queries) {
+        UNIT_ASSERT(names.insert(query.Name).second);
+        UNIT_ASSERT(texts.insert(query.Text).second);
+        UNIT_ASSERT(!query.Text.Contains("NULL"));
+        const size_t upsertPos = query.Text.find("UPSERT INTO");
+        const size_t updatePos = query.Text.find("UPDATE ");
+        UNIT_ASSERT((upsertPos == TString::npos) != (updatePos == TString::npos));
+        const size_t statement = upsertPos == TString::npos ? updatePos : upsertPos;
+        UNIT_ASSERT(query.Text.substr(statement).find('\'') == TString::npos);
+        if (upsertPos != TString::npos) {
+            ++upserts;
+            UNIT_ASSERT(query.Name.EndsWith(" upsert"));
+        } else {
+            UNIT_ASSERT(query.Text.Contains("seqno = $seqno"));
+            const ui32 assigned = UpdateAssignmentCount(query.Text);
+            UNIT_ASSERT(assigned >= 2);
+            UNIT_ASSERT(assigned <= 4);
+        }
+    }
+    UNIT_ASSERT_VALUES_EQUAL(upserts, AllTables().size());
+
+    ui64 expected = 0;
+    for (const TTable& table : AllTables()) {
+        ui64 values = 0;
+        bool hasSeqno = false;
+        for (const TColumn& column : table.Columns) {
+            if (column.Name == "seqno") {
+                hasSeqno = true;
+            } else if (!column.Key) {
+                ++values;
+            }
+        }
+        UNIT_ASSERT(hasSeqno);
+        ++expected;
+        for (ui64 k = 1; k <= 3 && k <= values; ++k) {
+            expected += Choose(values, k);
+        }
+    }
+    UNIT_ASSERT_VALUES_EQUAL(queries.size(), expected);
+    UNIT_ASSERT_VALUES_EQUAL(expected, static_cast<ui64>(24566));
+
+    for (const TTable& table : AllTables()) {
+        std::mt19937_64 rng(1);
+        const TString fullName = JoinPath("/db/replication", table.Name);
+        const TRowWrite write = MakeInsertWrite(table, fullName, 3, 9, rng);
+        UNIT_ASSERT_VALUES_EQUAL(write.Statement, InsertQuery(fullName, table));
+        UNIT_ASSERT(texts.contains(write.Statement));
+    }
+
+    const TVector<TTable>& tables = AllTables();
+    bool sawUpdate = false;
+    for (int i = 0; i < 30; ++i) {
+        TVector<TTableRuntime> state(tables.size());
+        for (TTableRuntime& runtime : state) {
+            runtime.Boundary = 30;
+        }
+        std::mt19937_64 rng(1000 + i);
+        const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 10 + i, 8, rng);
+        if (plan.Busy) {
+            continue;
+        }
+        for (const TRowWrite& write : plan.Writes) {
+            UNIT_ASSERT(texts.contains(write.Statement));
+            if (write.Update) {
+                sawUpdate = true;
+            }
+        }
+    }
+    UNIT_ASSERT(sawUpdate);
+
+    bool sawBoolWhere = false;
+    for (const TRunQuery& query : queries) {
+        if (!query.Name.StartsWith("pk_bool update ")) {
+            continue;
+        }
+        sawBoolWhere = true;
+        UNIT_ASSERT(query.Text.Contains("pk_seq_hash = $pk_seq_hash"));
+        UNIT_ASSERT(query.Text.Contains("pk = $pk"));
+        UNIT_ASSERT(query.Text.Contains("seq = $seq"));
+        break;
+    }
+    UNIT_ASSERT(sawBoolWhere);
 }
 
 Y_UNIT_TEST(ReservationKeepsDensePrefix) {

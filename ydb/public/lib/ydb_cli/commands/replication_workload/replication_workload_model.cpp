@@ -958,15 +958,16 @@ TVector<TVector<TBoundParam>> MakeImportRows(
     return rows;
 }
 
-TRowWrite MakeInsertWrite(
-    const TTable& table,
-    const TString& fullName,
-    ui64 n,
-    ui64 seqno,
-    std::mt19937_64& rng)
-{
-    TRowWrite write;
-    TVector<TBoundParam> params = MakeRowParams(table, n, seqno, rng);
+TString InsertQuery(const TString& fullName, const TTable& table) {
+    TVector<TBoundParam> params;
+    params.reserve(table.Columns.size());
+    for (const TColumn& column : table.Columns) {
+        TBoundParam param;
+        param.Name = column.Name;
+        param.SqlType = SqlType(column.Type);
+        param.Optional = !column.Key && column.Name != "seqno";
+        params.push_back(std::move(param));
+    }
     TStringBuilder sql;
     sql << "UPSERT INTO " << QuotePath(fullName) << " (" << ColumnList(table.Columns) << ") VALUES (";
     for (size_t i = 0; i < params.size(); ++i) {
@@ -976,8 +977,60 @@ TRowWrite MakeInsertWrite(
         sql << "$" << params[i].Name;
     }
     sql << ");";
-    write.Statement = QueryText(sql, params);
-    write.Params = std::move(params);
+    return QueryText(sql, params);
+}
+
+TString UpdateQuery(const TString& fullName, const TTable& table, const TVector<const TColumn*>& assigned) {
+    TVector<const TColumn*> columns = assigned;
+    std::sort(columns.begin(), columns.end(), [](const TColumn* left, const TColumn* right) {
+        return left->Name < right->Name;
+    });
+    TVector<TBoundParam> params;
+    params.reserve(columns.size() + table.Columns.size());
+    TStringBuilder sql;
+    sql << "UPDATE " << QuotePath(fullName) << " SET ";
+    for (size_t i = 0; i < columns.size(); ++i) {
+        if (i) {
+            sql << ", ";
+        }
+        const TColumn& column = *columns[i];
+        TBoundParam value;
+        value.Name = column.Name;
+        value.SqlType = SqlType(column.Type);
+        value.Optional = column.Name != "seqno";
+        sql << column.Name << " = $" << value.Name;
+        params.push_back(std::move(value));
+    }
+    sql << " WHERE ";
+    bool firstKey = true;
+    for (const TColumn& column : table.Columns) {
+        if (!column.Key) {
+            continue;
+        }
+        if (!firstKey) {
+            sql << " AND ";
+        }
+        firstKey = false;
+        TBoundParam key;
+        key.Name = column.Name;
+        key.SqlType = SqlType(column.Type);
+        sql << column.Name << " = $" << key.Name;
+        params.push_back(std::move(key));
+    }
+    sql << ";";
+    return QueryText(sql, params);
+}
+
+TRowWrite MakeInsertWrite(
+    const TTable& table,
+    const TString& fullName,
+    ui64 n,
+    ui64 seqno,
+    std::mt19937_64& rng)
+{
+    TRowWrite write;
+    write.Params = MakeRowParams(table, n, seqno, rng);
+    write.Statement = InsertQuery(fullName, table);
     return write;
 }
 
@@ -1116,49 +1169,115 @@ TTxPlan BuildTransaction(
             std::sort(chosen.begin(), chosen.end(), [](const TColumn* left, const TColumn* right) {
                 return left->Name < right->Name;
             });
-            TStringBuilder sql;
-            sql << "UPDATE " << QuotePath(fullName) << " SET ";
             TVector<TBoundParam> params;
-            for (size_t i = 0; i < chosen.size(); ++i) {
-                if (i) {
-                    sql << ", ";
-                }
+            for (const TColumn* column : chosen) {
                 TBoundParam value;
-                if (chosen[i]->Name == "seqno") {
+                if (column->Name == "seqno") {
                     value.Name = "seqno";
                     value.SqlType = "Uint64";
                     value.Kind = EParamKind::Uint64;
                     value.U = seqno;
                 } else {
-                    value = MakeValue(*chosen[i], rng);
-                    value.Name = chosen[i]->Name;
+                    value = MakeValue(*column, rng);
+                    value.Name = column->Name;
                     value.Optional = true;
                 }
-                sql << chosen[i]->Name << " = $" << value.Name;
                 params.push_back(std::move(value));
             }
             MaybeNullValue(params, rng, 1);
-            sql << " WHERE ";
             TVector<TBoundParam> keys = MakeKeyParams(table, number, "");
-            size_t keyIndex = 0;
-            for (const TColumn& column : table.Columns) {
-                if (!column.Key) {
-                    continue;
-                }
-                if (keyIndex != 0) {
-                    sql << " AND ";
-                }
-                sql << column.Name << " = $" << keys[keyIndex].Name;
-                params.push_back(std::move(keys[keyIndex]));
-                ++keyIndex;
+            for (TBoundParam& key : keys) {
+                params.push_back(std::move(key));
             }
-            sql << ";";
-            write.Statement = QueryText(sql, params);
+            write.Statement = UpdateQuery(fullName, table, chosen);
             write.Params = std::move(params);
             plan.Writes.push_back(std::move(write));
         }
     }
     return plan;
+}
+
+namespace {
+
+bool NextCombination(TVector<size_t>& comb, size_t n) {
+    const size_t k = comb.size();
+    if (k == 0 || n < k) {
+        return false;
+    }
+    for (size_t pos = k; pos-- > 0;) {
+        const size_t limit = n - k + pos;
+        if (comb[pos] < limit) {
+            ++comb[pos];
+            for (size_t next = pos + 1; next < k; ++next) {
+                comb[next] = comb[next - 1] + 1;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+TVector<TRunQuery> RunQueries(const TString& pathPrefix) {
+    TVector<TRunQuery> queries;
+    for (const TTable& table : AllTables()) {
+        const TString fullName = JoinPath(pathPrefix, table.Name);
+        TRunQuery insert;
+        insert.Name = table.Name + " upsert";
+        insert.Text = InsertQuery(fullName, table);
+        queries.push_back(std::move(insert));
+
+        const TColumn* seqno = nullptr;
+        TVector<const TColumn*> values;
+        for (const TColumn& column : table.Columns) {
+            if (column.Name == "seqno") {
+                seqno = &column;
+            } else if (!column.Key) {
+                values.push_back(&column);
+            }
+        }
+        if (!seqno || values.empty()) {
+            continue;
+        }
+        const size_t n = values.size();
+        for (size_t k = 1; k <= 3 && k <= n; ++k) {
+            TVector<size_t> comb(k);
+            for (size_t i = 0; i < k; ++i) {
+                comb[i] = i;
+            }
+            auto emit = [&] {
+                TVector<const TColumn*> chosen;
+                chosen.reserve(k + 1);
+                chosen.push_back(seqno);
+                TVector<TString> setNames;
+                setNames.reserve(k + 1);
+                setNames.push_back("seqno");
+                for (size_t index : comb) {
+                    chosen.push_back(values[index]);
+                    setNames.push_back(values[index]->Name);
+                }
+                std::sort(setNames.begin(), setNames.end());
+                TStringBuilder name;
+                name << table.Name << " update ";
+                for (size_t i = 0; i < setNames.size(); ++i) {
+                    if (i) {
+                        name << ",";
+                    }
+                    name << setNames[i];
+                }
+                TRunQuery query;
+                query.Name = name;
+                query.Text = UpdateQuery(fullName, table, chosen);
+                queries.push_back(std::move(query));
+            };
+            emit();
+            while (NextCombination(comb, n)) {
+                emit();
+            }
+        }
+    }
+    return queries;
 }
 
 } // namespace NYdb::NConsoleClient::NReplicationWorkload

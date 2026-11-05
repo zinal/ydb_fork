@@ -198,6 +198,20 @@ TRowWrite MakeInsertWrite(
     ui64 seqno,
     std::mt19937_64& rng);
 
+// One statement run can send. The text is declarations plus the statement.
+// It does not contain parameter values: an insert into a table has one text,
+// and an update text depends only on the assigned columns.
+struct TRunQuery {
+    TString Name;
+    TString Text;
+};
+
+TString InsertQuery(const TString& fullName, const TTable& table);
+// `assigned` includes seqno and one, two, or three other value columns.
+TString UpdateQuery(const TString& fullName, const TTable& table, const TVector<const TColumn*>& assigned);
+// Every UPSERT and UPDATE text run can send. Tables live under pathPrefix.
+TVector<TRunQuery> RunQueries(const TString& pathPrefix);
+
 TString ImportQuery(const TString& fullName, const TTable& table);
 TVector<TVector<TBoundParam>> MakeImportRows(
     const TTable& table,
