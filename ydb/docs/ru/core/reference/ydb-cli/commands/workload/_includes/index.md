@@ -32,6 +32,7 @@
 * [Query](../../../workload-query.md) - Пользовательская нагрузка.
 * [Fulltext](../../../workload-fulltext.md) - Fulltext нагрузка.
 * [Vector](../../../workload-vector.md) - Нагрузка векторного поиска.
+* [Replication](../../../workload-replication.md) - Нагрузка для проверки асинхронной репликации.
 
 ## Общие параметры для всех видов нагрузки {#global_workload_options}
 
