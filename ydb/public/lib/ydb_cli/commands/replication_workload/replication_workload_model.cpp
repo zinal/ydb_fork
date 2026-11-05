@@ -52,6 +52,7 @@ TVector<TColumn> SingleColumns(EColType pkType) {
 TVector<TColumn> CompositeColumns(EColType pkType, bool seqnoHashPrefix) {
     TVector<TColumn> columns;
     if (seqnoHashPrefix) {
+        // First key column. Its value is HashPkSeq(pk, seq), so a later UPDATE rebuilds it.
         columns.push_back(Col("seqno_hash", EColType::Uint64, EFill::None, true));
     }
     columns.push_back(Col("pk", pkType, EFill::None, true));
@@ -669,6 +670,25 @@ ui64 HashSeqno(ui64 seqno) {
     return x ^ (x >> 31);
 }
 
+ui64 HashPkSeq(ui64 pk, ui64 seq) {
+    return HashSeqno(HashSeqno(pk) ^ seq);
+}
+
+namespace {
+
+ui64 PkSeqBits(const TBoundParam& pk) {
+    switch (pk.Kind) {
+        case EParamKind::Bool:
+            return pk.Bool ? 1ull : 0ull;
+        case EParamKind::Decimal:
+            return static_cast<ui64>(FromString<i64>(pk.Text));
+        default:
+            ythrow yexception() << "seqno_hash prefix requires a Bool or Decimal(1, 0) key";
+    }
+}
+
+} // namespace
+
 TString HashBytes(ui64 n) {
     unsigned char input[8];
     for (int i = 0; i < 8; ++i) {
@@ -843,17 +863,18 @@ TBoundParam MakeValue(const TColumn& column, std::mt19937_64& rng) {
     return param;
 }
 
-TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, const TString& namePrefix) {
+TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, const TString& namePrefix) {
+    TBoundParam pk = KeyParam(table, n, namePrefix + PkColumn(table).Name);
     TVector<TBoundParam> params;
     if (table.SeqnoHashPrefix) {
         TBoundParam hash;
         hash.Name = namePrefix + "seqno_hash";
         hash.SqlType = "Uint64";
         hash.Kind = EParamKind::Uint64;
-        hash.U = seqnoHash;
+        hash.U = HashPkSeq(PkSeqBits(pk), n);
         params.push_back(std::move(hash));
     }
-    params.push_back(KeyParam(table, n, namePrefix + PkColumn(table).Name));
+    params.push_back(std::move(pk));
     if (table.Composite) {
         TBoundParam seq;
         seq.Name = namePrefix + "seq";
@@ -883,7 +904,7 @@ void MaybeNullValue(TVector<TBoundParam>& params, std::mt19937_64& rng, int perc
 }
 
 TVector<TBoundParam> MakeRowParams(const TTable& table, ui64 n, ui64 seqno, std::mt19937_64& rng) {
-    TVector<TBoundParam> params = MakeKeyParams(table, n, HashSeqno(seqno), "");
+    TVector<TBoundParam> params = MakeKeyParams(table, n, "");
     for (const TColumn& column : table.Columns) {
         if (column.Key) {
             continue;
@@ -1118,13 +1139,7 @@ TTxPlan BuildTransaction(
             }
             MaybeNullValue(params, rng, 1);
             sql << " WHERE ";
-            ui64 seqnoHash = HashSeqno(0);
-            if (table.SeqnoHashPrefix) {
-                if (const ui64* found = state[item.Index].SeqnoHashByRow.FindPtr(number)) {
-                    seqnoHash = *found;
-                }
-            }
-            TVector<TBoundParam> keys = MakeKeyParams(table, number, seqnoHash, "");
+            TVector<TBoundParam> keys = MakeKeyParams(table, number, "");
             size_t keyIndex = 0;
             for (const TColumn& column : table.Columns) {
                 if (!column.Key) {

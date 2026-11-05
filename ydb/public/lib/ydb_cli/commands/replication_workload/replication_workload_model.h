@@ -1,6 +1,5 @@
 #pragma once
 
-#include <util/generic/hash.h>
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
 #include <util/system/types.h>
@@ -160,9 +159,6 @@ struct TReservation {
 struct TTableRuntime {
     i64 Boundary = -1;
     bool InsertBusy = false;
-    // Row number -> seqno_hash written when the row was inserted.
-    // Used by Bool and Decimal(1, 0), whose primary key starts with that hash.
-    THashMap<ui64, ui64> SeqnoHashByRow;
 };
 
 struct TTxPlan {
@@ -183,6 +179,9 @@ TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minP
 TVector<TString> AlterIndexQueries(const TString& fullName, const TTable& table, ui64 minPartitions, ui64 maxPartitions);
 
 ui64 HashSeqno(ui64 seqno);
+// Hash of the key columns (pk, seq) for pk_bool and pk_decimal_narrow.
+// pk is 0 or 1 for Bool, and the two's complement of the Decimal(1, 0) value.
+ui64 HashPkSeq(ui64 pk, ui64 seq);
 TString HashBytes(ui64 n);
 TString HashHex(ui64 n);
 TString MakeText(EColType type, EFill fill, std::mt19937_64& rng);
@@ -190,7 +189,7 @@ TString MakeText(EColType type, EFill fill, std::mt19937_64& rng);
 // Among params with Optional set, with probability percent/100 mark exactly one Null.
 void MaybeNullValue(TVector<TBoundParam>& params, std::mt19937_64& rng, int percent);
 TBoundParam MakeValue(const TColumn& column, std::mt19937_64& rng);
-TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, ui64 seqnoHash, const TString& namePrefix);
+TVector<TBoundParam> MakeKeyParams(const TTable& table, ui64 n, const TString& namePrefix);
 
 TRowWrite MakeInsertWrite(
     const TTable& table,

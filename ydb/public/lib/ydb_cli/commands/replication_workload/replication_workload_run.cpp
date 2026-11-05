@@ -87,26 +87,6 @@ i64 LoadBoundary(
     return static_cast<i64>(value);
 }
 
-void LoadSeqnoHashes(
-    NQuery::TQueryClient& client,
-    const TString& fullName,
-    const TDuration& timeout,
-    THashMap<ui64, ui64>& hashes)
-{
-    const TString query = "SELECT seq, seqno_hash FROM " + QuotePath(fullName) + ";";
-    auto result = client.ExecuteQuery(
-        query,
-        ReadOnlyTx(),
-        MakeQuerySettings(timeout)).GetValueSync();
-    EnsureQuery(result, query);
-    TResultSetParser parser(result.GetResultSet(0));
-    while (parser.TryNextRow()) {
-        const ui64 seq = parser.ColumnParser("seq").GetUint64();
-        const ui64 hash = parser.ColumnParser("seqno_hash").GetUint64();
-        hashes[seq] = hash;
-    }
-}
-
 struct TEvent {
     TInstant When;
     bool Finish = false;
@@ -172,9 +152,6 @@ public:
                 const TString fullName = JoinPath(Root, Tables[index].Name);
                 try {
                     State[index].Boundary = LoadBoundary(Client, Tables[index], fullName, timeout);
-                    if (Tables[index].SeqnoHashPrefix) {
-                        LoadSeqnoHashes(Client, fullName, timeout, State[index].SeqnoHashByRow);
-                    }
                 } catch (const std::exception& ex) {
                     fail(ex.what());
                 } catch (...) {
@@ -327,15 +304,6 @@ private:
         }
         ApplyReservations(State, event.Plan->Reservations, event.Success);
         if (event.Success) {
-            const ui64 hash = HashSeqno(event.Plan->Seqno);
-            for (const TReservation& reservation : event.Plan->Reservations) {
-                if (!Tables[reservation.TableIndex].SeqnoHashPrefix) {
-                    continue;
-                }
-                for (ui64 row = 0; row < reservation.Count; ++row) {
-                    State[reservation.TableIndex].SeqnoHashByRow[reservation.First + row] = hash;
-                }
-            }
             SuccessCount.fetch_add(1);
             WindowSuccessCount.fetch_add(1);
         } else {

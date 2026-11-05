@@ -5,6 +5,8 @@
 
 #include <library/cpp/testing/unittest/registar.h>
 
+#include <util/string/cast.h>
+
 #include <random>
 
 namespace NYdb::NConsoleClient::NReplicationWorkload {
@@ -14,6 +16,15 @@ const TTable* Find(const TString& name) {
     for (const TTable& table : AllTables()) {
         if (table.Name == name) {
             return &table;
+        }
+    }
+    return nullptr;
+}
+
+const TBoundParam* FindParam(const TVector<TBoundParam>& params, const TString& name) {
+    for (const TBoundParam& param : params) {
+        if (param.Name == name) {
+            return &param;
         }
     }
     return nullptr;
@@ -104,28 +115,34 @@ Y_UNIT_TEST(KeysAndText) {
     const TTable* text = Find("pk_utf8");
     const TTable* uuid = Find("pk_uuid");
     const TTable* uint64 = Find("pk_uint64");
-    auto boolKey = MakeKeyParams(*boolean, 0, HashSeqno(0), "k");
-    UNIT_ASSERT_VALUES_EQUAL(boolKey[0].U, HashSeqno(0));
+    auto boolKey = MakeKeyParams(*boolean, 0, "k");
+    UNIT_ASSERT_VALUES_EQUAL(boolKey[0].U, HashPkSeq(0, 0));
     UNIT_ASSERT(!boolKey[1].Bool);
-    boolKey = MakeKeyParams(*boolean, 1, HashSeqno(9), "k");
-    UNIT_ASSERT_VALUES_EQUAL(boolKey[0].U, HashSeqno(9));
+    UNIT_ASSERT_VALUES_EQUAL(boolKey[2].U, 0);
+    boolKey = MakeKeyParams(*boolean, 1, "k");
+    UNIT_ASSERT_VALUES_EQUAL(boolKey[0].U, HashPkSeq(1, 1));
     UNIT_ASSERT(boolKey[1].Bool);
     UNIT_ASSERT_VALUES_EQUAL(boolKey[2].U, 1);
+    const auto sameBoolPk = MakeKeyParams(*boolean, 2, "k");
+    UNIT_ASSERT(!sameBoolPk[1].Bool);
+    UNIT_ASSERT_VALUES_EQUAL(sameBoolPk[2].U, 2);
+    UNIT_ASSERT_VALUES_EQUAL(sameBoolPk[0].U, HashPkSeq(0, 2));
+    UNIT_ASSERT(sameBoolPk[0].U != MakeKeyParams(*boolean, 0, "k")[0].U);
     UNIT_ASSERT(HashSeqno(1) != HashSeqno(2));
 
     const TString digest = HashBytes(42);
     UNIT_ASSERT_VALUES_EQUAL(digest.size(), 32);
     UNIT_ASSERT_VALUES_EQUAL(HashHex(42).size(), 64);
     UNIT_ASSERT(HashBytes(1) != HashBytes(2));
-    UNIT_ASSERT_VALUES_EQUAL(MakeKeyParams(*bytes, 7, 0, "k")[0].Text, HashBytes(7));
-    UNIT_ASSERT_VALUES_EQUAL(MakeKeyParams(*text, 7, 0, "k")[0].Text, HashHex(7));
+    UNIT_ASSERT_VALUES_EQUAL(MakeKeyParams(*bytes, 7, "k")[0].Text, HashBytes(7));
+    UNIT_ASSERT_VALUES_EQUAL(MakeKeyParams(*text, 7, "k")[0].Text, HashHex(7));
 
-    const ui64 firstNumber = MakeKeyParams(*uint64, 1, 0, "k")[0].U;
-    const ui64 secondNumber = MakeKeyParams(*uint64, 2, 0, "k")[0].U;
+    const ui64 firstNumber = MakeKeyParams(*uint64, 1, "k")[0].U;
+    const ui64 secondNumber = MakeKeyParams(*uint64, 2, "k")[0].U;
     UNIT_ASSERT((firstNumber >> 63) != (secondNumber >> 63));
 
-    const TString first = MakeKeyParams(*uuid, 1, 0, "k")[0].Text;
-    const TString second = MakeKeyParams(*uuid, 2, 0, "k")[0].Text;
+    const TString first = MakeKeyParams(*uuid, 1, "k")[0].Text;
+    const TString second = MakeKeyParams(*uuid, 2, "k")[0].Text;
     UNIT_ASSERT_VALUES_EQUAL(first.size(), 16);
     UNIT_ASSERT(first.substr(0, 8) != TString(8, '\0'));
     UNIT_ASSERT_VALUES_EQUAL(static_cast<unsigned char>(first[15]), 1);
@@ -149,6 +166,70 @@ Y_UNIT_TEST(KeysAndText) {
     for (unsigned char ch : utf8) {
         UNIT_ASSERT(ch >= 32 && ch < 127);
     }
+}
+
+Y_UNIT_TEST(SeqnoHashFollowsPkAndSeq) {
+    const TTable* boolean = Find("pk_bool");
+    const TTable* decimal = Find("pk_decimal_narrow");
+    UNIT_ASSERT(boolean && decimal);
+
+    const auto decimalZero = MakeKeyParams(*decimal, 0, "k");
+    UNIT_ASSERT_VALUES_EQUAL(decimalZero[1].Text, "-9");
+    UNIT_ASSERT_VALUES_EQUAL(decimalZero[0].U, HashPkSeq(static_cast<ui64>(static_cast<i64>(-9)), 0));
+    UNIT_ASSERT_VALUES_EQUAL(decimalZero[2].U, 0);
+    const auto decimalAgain = MakeKeyParams(*decimal, 19, "k");
+    UNIT_ASSERT_VALUES_EQUAL(decimalAgain[1].Text, "-9");
+    UNIT_ASSERT_VALUES_EQUAL(decimalAgain[2].U, 19);
+    UNIT_ASSERT_VALUES_EQUAL(decimalAgain[0].U, HashPkSeq(static_cast<ui64>(static_cast<i64>(-9)), 19));
+    UNIT_ASSERT(decimalAgain[0].U != decimalZero[0].U);
+
+    std::mt19937_64 leftRng(1);
+    std::mt19937_64 rightRng(1);
+    const TRowWrite inserted = MakeInsertWrite(*boolean, "/db/replication/pk_bool", 5, 0, leftRng);
+    const TRowWrite rewritten = MakeInsertWrite(*boolean, "/db/replication/pk_bool", 5, 42, rightRng);
+    const TBoundParam* insertedHash = FindParam(inserted.Params, "seqno_hash");
+    const TBoundParam* rewrittenHash = FindParam(rewritten.Params, "seqno_hash");
+    const TBoundParam* insertedSeqno = FindParam(inserted.Params, "seqno");
+    const TBoundParam* rewrittenSeqno = FindParam(rewritten.Params, "seqno");
+    UNIT_ASSERT(insertedHash && rewrittenHash && insertedSeqno && rewrittenSeqno);
+    UNIT_ASSERT_VALUES_EQUAL(insertedHash->U, HashPkSeq(1, 5));
+    UNIT_ASSERT_VALUES_EQUAL(rewrittenHash->U, HashPkSeq(1, 5));
+    UNIT_ASSERT_VALUES_EQUAL(insertedSeqno->U, 0);
+    UNIT_ASSERT_VALUES_EQUAL(rewrittenSeqno->U, 42);
+
+    bool sawBool = false;
+    bool sawDecimal = false;
+    for (int seed = 0; seed < 40 && !(sawBool && sawDecimal); ++seed) {
+        TVector<TTableRuntime> state(AllTables().size());
+        for (TTableRuntime& table : state) {
+            table.Boundary = 40;
+        }
+        std::mt19937_64 rng(30 + seed);
+        const TTxPlan plan = BuildTransaction(AllTables(), state, "/db/replication", 1000 + seed, 4, rng);
+        for (const TRowWrite& write : plan.Writes) {
+            if (!write.Update) {
+                continue;
+            }
+            const TBoundParam* hash = FindParam(write.Params, "seqno_hash");
+            if (hash == nullptr) {
+                continue;
+            }
+            const TBoundParam* pk = FindParam(write.Params, "pk");
+            const TBoundParam* seq = FindParam(write.Params, "seq");
+            UNIT_ASSERT(pk && seq);
+            if (write.Statement.Contains("UPDATE `/db/replication/pk_bool`")) {
+                sawBool = true;
+                UNIT_ASSERT_VALUES_EQUAL(hash->U, HashPkSeq(pk->Bool ? 1 : 0, seq->U));
+            }
+            if (write.Statement.Contains("UPDATE `/db/replication/pk_decimal_narrow`")) {
+                sawDecimal = true;
+                const ui64 pkBits = static_cast<ui64>(FromString<i64>(pk->Text));
+                UNIT_ASSERT_VALUES_EQUAL(hash->U, HashPkSeq(pkBits, seq->U));
+            }
+        }
+    }
+    UNIT_ASSERT(sawBool);
+    UNIT_ASSERT(sawDecimal);
 }
 
 Y_UNIT_TEST(ImportBatchUsesAsTable) {
@@ -182,7 +263,8 @@ Y_UNIT_TEST(ImportBatchUsesAsTable) {
     for (size_t i = 0; i < boolean->Columns.size(); ++i) {
         UNIT_ASSERT_VALUES_EQUAL(rows[0][i].Name, boolean->Columns[i].Name);
     }
-    UNIT_ASSERT_VALUES_EQUAL(rows[0][0].U, HashSeqno(0));
+    UNIT_ASSERT_VALUES_EQUAL(rows[0][0].U, HashPkSeq(1, 5));
+    UNIT_ASSERT_VALUES_EQUAL(rows[1][0].U, HashPkSeq(0, 6));
     UNIT_ASSERT_VALUES_EQUAL(rows[0][2].U, 5);
     UNIT_ASSERT_VALUES_EQUAL(rows[1][2].U, 6);
     for (const TVector<TBoundParam>& row : rows) {
