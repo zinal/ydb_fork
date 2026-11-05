@@ -50,7 +50,7 @@ The number comes from an atomic counter in the command process. The counter adva
 
 On `import` the operation number is 0. The load does not advance the counter.
 
-When `run` starts, the counter is set to the current Unix time in microseconds: the integer number of UTC microseconds since 1970-01-01. The first transaction of that run receives this value, and each following new transaction receives the next integer. A later `run` again sets the counter to the Unix time of its own start, also in microseconds.
+When the execution phase of `run` starts, the counter is set to the current Unix time in microseconds: the integer number of UTC microseconds since 1970-01-01. The phase starts after the boundary read and a 30 second pause. The first transaction of that run receives this value, and each following new transaction receives the next integer. A later `run` again sets the counter to the Unix time at the start of its own execution phase, also in microseconds.
 
 ### Composite key of a narrow type {#composite-key}
 
@@ -325,6 +325,8 @@ If the query returns `C`, the maximum number is `C − 1` and the next free numb
 
 This read is valid while the table contains only rows of this workload and their numbers form a contiguous prefix `0 .. boundary`. How that prefix is preserved is described below.
 
+Once every table boundary has been read, the command waits 30 seconds and only then starts the execution phase of `--seconds`. No transaction is sent during the pause. The `seqno` counter is set at the end of the pause. The start and finish timestamps of the phase are described in [Output](#output).
+
 ### Maintaining the boundary during `run` {#boundary-maintain}
 
 The boundary is kept in the process memory and moves forward when a transaction with new numbers commits successfully.
@@ -366,6 +368,15 @@ The upper bound on simultaneous transactions equals the number of users. The cli
 `--seed` fixes the random generator: table selection, the row count R, selection of numbers for update, and the lengths and contents of values. With several users the seed fixes each user's decisions, but not the order in which their transactions interleave. If the parameter is omitted, the seed is taken from the current time. Numbers of new rows do not depend on the seed: the table boundary issues them.
 
 ## Output {#output}
+
+The execution phase starts 30 seconds after the boundary read. Its start and finish are printed in the local time zone of the operating system, as ISO 8601 with the UTC offset, to the second:
+
+```text
+run_started=2026-11-05T16:27:01+03:00
+run_finished=2026-11-05T16:32:01+03:00
+```
+
+`run_started` is printed before the first statistics line, and `run_finished` after the total. The boundary read and the pause are outside these timestamps and outside `elapsed_s`.
 
 Once per `--window` seconds (once per second by default) one line is printed to standard output:
 
