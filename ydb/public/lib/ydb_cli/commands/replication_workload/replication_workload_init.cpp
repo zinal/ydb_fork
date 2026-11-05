@@ -11,9 +11,12 @@
 
 #include <util/generic/yexception.h>
 #include <util/string/builder.h>
+#include <util/string/printf.h>
 #include <util/system/info.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <random>
 #include <thread>
@@ -30,6 +33,21 @@ TDriver MakeDriver(TClientCommand::TConfig& config, ui64 threads) {
         driverConfig.SetClientThreadsNum(threads);
     }
     return TDriver(driverConfig);
+}
+
+TString OneDecimal(double value) {
+    return Sprintf("%.1f", value);
+}
+
+void PrintImportProgress(double elapsedSec, ui64 rows, ui64 rowsTotal, ui64 tablesDone, ui64 tables) {
+    const double rate = elapsedSec > 0 ? static_cast<double>(rows) / elapsedSec : 0;
+    Cout << "elapsed_s=" << OneDecimal(elapsedSec)
+        << " rows=" << rows
+        << " rows_total=" << rowsTotal
+        << " rows_per_s=" << OneDecimal(rate)
+        << " tables_done=" << tablesDone
+        << " tables=" << tables
+        << Endl;
 }
 
 void EnsureDirectory(const TDriver& driver, const TString& path) {
@@ -134,9 +152,15 @@ int TCommandWorkloadReplicationImport::Run(TConfig& config) {
 
     std::atomic<size_t> next{0};
     std::atomic<bool> failed{false};
+    std::atomic<ui64> rowsDone{0};
+    std::atomic<ui64> tablesDone{0};
+    std::atomic<ui64> finishedWorkers{0};
     std::mutex errorMutex;
+    std::mutex doneMutex;
+    std::condition_variable doneCv;
     TString errorText;
     const ui64 seedBase = TInstant::Now().MicroSeconds();
+    const ui64 rowsTotal = Rows * static_cast<ui64>(tables.size());
     auto fail = [&](const TString& text) {
         std::lock_guard<std::mutex> lock(errorMutex);
         if (errorText.empty()) {
@@ -148,9 +172,10 @@ int TCommandWorkloadReplicationImport::Run(TConfig& config) {
         while (!failed.load()) {
             const size_t index = next.fetch_add(1);
             if (index >= tables.size()) {
-                return;
+                break;
             }
             std::mt19937_64 rng(seedBase + index);
+            ui64 written = 0;
             for (ui64 begin = 0; begin < Rows && !failed.load(); begin += BatchSize) {
                 const ui64 count = std::min(BatchSize, Rows - begin);
                 try {
@@ -165,24 +190,59 @@ int TCommandWorkloadReplicationImport::Run(TConfig& config) {
                         fail(TStringBuilder() << "table " << fullNames[index]
                             << " error status=" << status.GetStatus()
                             << " issues=" << status.GetIssues().ToString());
+                        break;
                     }
+                    written += count;
+                    rowsDone.fetch_add(count);
                 } catch (const std::exception& ex) {
                     fail(TStringBuilder() << "table " << fullNames[index] << " " << ex.what());
+                    break;
                 } catch (...) {
                     fail(TStringBuilder() << "table " << fullNames[index] << " import failed");
+                    break;
                 }
             }
+            if (written == Rows) {
+                tablesDone.fetch_add(1);
+            }
         }
+        finishedWorkers.fetch_add(1);
+        doneCv.notify_all();
     };
 
     const ui64 workerCount = std::min<ui64>(Threads, tables.size());
+    const TInstant start = TInstant::Now();
     TVector<std::thread> pool;
     pool.reserve(workerCount);
     for (ui64 i = 0; i < workerCount; ++i) {
         pool.emplace_back(worker);
     }
+    TInstant lastReport;
+    bool reported = false;
+    auto report = [&] {
+        const double elapsed = static_cast<double>((TInstant::Now() - start).MicroSeconds()) / 1000000.0;
+        PrintImportProgress(elapsed, rowsDone.load(), rowsTotal, tablesDone.load(), tables.size());
+        lastReport = TInstant::Now();
+        reported = true;
+    };
+    while (finishedWorkers.load() < workerCount) {
+        bool done = false;
+        {
+            std::unique_lock lock(doneMutex);
+            done = doneCv.wait_for(lock, std::chrono::seconds(30), [&] {
+                return finishedWorkers.load() >= workerCount;
+            });
+        }
+        if (done) {
+            break;
+        }
+        report();
+    }
     for (std::thread& thread : pool) {
         thread.join();
+    }
+    if (!reported || TInstant::Now() - lastReport >= TDuration::Seconds(1)) {
+        report();
     }
     if (failed.load()) {
         throw yexception() << errorText;
