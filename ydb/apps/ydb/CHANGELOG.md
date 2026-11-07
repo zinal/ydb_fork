@@ -1,3 +1,4 @@
+* Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests. Each table is updated with five fixed statements. On a wide table those statements assign `seqno` with `c_wide`, with one ordinary column, with `c_medium` and three ordinary columns, with four ordinary columns, or with every value column.
 * Added `--expected-generation` option to `ydb admin cluster bridge update` to apply a cluster state update only if the cluster state still has the given generation.
 * Added `ydb admin cluster bridge set-database-mode` to enable or disable bridge mode for the database selected with `--target-database`. Use `bridged` or `ordinary` as the required mode argument, and optionally `--retain-pile` with `ordinary`.
 * Added `ydb admin cluster bridge destroy-pile` command to destroy a DISCONNECTED pile along with all its data (asks for confirmation unless `-y` is given).
