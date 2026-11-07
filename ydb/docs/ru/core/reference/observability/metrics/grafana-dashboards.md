@@ -227,3 +227,21 @@
 | Partition sessions started | Количество сессий чтения топика читателем, запущенных в секунду |
 
 Скачать шаблон дашборда **Topic — Consumer**: [topic-consumer.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/topic-consumer.json).
+
+## Aggregate load {#aggregate-load}
+
+Суммарные показатели за интервал времени, выбранный в переключателе периода дашборда, и для базы данных, выбранной в фильтре `database`. Каждая панель — одно агрегированное число. Временных рядов на дашборде нет.
+
+На дашборде есть следующие фильтры:
+
+- `database` — база данных, метрики которой отображаются;
+- `ds` — источник данных Prometheus.
+
+| Имя | Описание |
+| --- | --- |
+| Transactions | Общее количество транзакций за выбранный интервал. Суммарный прирост `ydb_table_transaction_total_duration_milliseconds_count` по всем узлам и типам транзакций. |
+| CPU time | Общее процессорное время на узлах базы данных за выбранный интервал, в секундах. Суммарный прирост `utils_ElapsedMicrosec` по всем узлам и пулам исполнения, переведённый из микросекунд. |
+| Topic data written | Объём данных, записанных во все топики за выбранный интервал, в мегабайтах (1 МБ = 10^6 байт). Суммарный прирост `ydb_topic_write_bytes` по всем топикам и узлам. |
+| Topic data read | Объём данных, прочитанных из всех топиков за выбранный интервал, в мегабайтах (1 МБ = 10^6 байт). Суммарный прирост `ydb_topic_read_bytes` по всем топикам и узлам. |
+
+Скачать шаблон дашборда **Aggregate load**: [aggregate-load.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/aggregate-load.json).
