@@ -83,25 +83,47 @@ host_configs:
     disk_scope: fail-domain-2
 ```
 
-Чтобы домены отказа рассчитывались по уровню `disk_scope` для статической группы и других групп хранения, укажите соответствующий тип домена отказа в yaml-конфиге (верхнеуровневый ключ):
+Режиму `block-4-2` нужны 8 доменов отказа, и он переживает потерю 2 из них. Две разные метки `disk_scope` на каждом сервере дают эти 8 доменов (4 сервера × 2). Отказ одного сервера тогда задевает ровно 2 домена. Третья отдельная метка на том же сервере заденет больше двух доменов, а этот режим такого отказа не переживает. Дополнительные диски добавляются к тем же двум меткам. У каждого сервера должен быть свой `location.body`. Одинаковая метка на разных серверах — это разные домены, потому что сервер входит в домен. Число стоек не важно.
 
-``` yaml
-fail_domain_type: disk_scope
-```
+Метка учитывается на уровне 50, сразу после сервера (`unit` / `location.body`, уровень 40). Отдельный диск — это уровень 255. Граница домена отказа поэтому `domain_level_end: 60`. Утилита `ydbd_slice` разворачивает шаблонный ключ `fail_domain_type: disk_scope` именно в эту геометрию (`ydb/tools/cfg/types.py`, `DistinctionLevels`) и для статической группы, и для пулов хранения.
 
-И в конфигурации домена:
+В ConfigV2 значение `fail_domain_type: disk_scope` недопустимо. Поле принимает только `rack`, `body` и `disk`. `body` (граница 50) игнорирует `disk_scope`, а `disk` (граница 256) делает каждый диск отдельным доменом, и на одном сервере может оказаться больше двух VDisk одной группы. Геометрию нужно задать явно и одинаково для статической группы и для пулов хранения баз данных. Полный пример — [block-4-2-4-nodes.yaml](https://github.com/ydb-platform/ydb/blob/main/ydb/deploy/yaml_config_examples/block-4-2-4-nodes.yaml).
 
 ```yaml
-domains:
-- domain_name: <имя домена>
-  ...
-  storage_pool_kinds:
-  - kind: <тип используемых физических устройств>
-    fail_domain_type: disk_scope
-    ...
+metadata:
+  kind: MainConfig
+  cluster: ""
+  version: 0
+config:
+  erasure: block-4-2
+  domain_name: Root
+  default_disk_type: SSD
+  self_management_config:
+    enabled: true
+    geometry: &disk_scope_geometry
+      realm_level_begin: 10
+      realm_level_end: 20
+      domain_level_begin: 10
+      domain_level_end: 60
+      num_fail_realms: 1
+      num_fail_domains_per_fail_realm: 8
+      num_vdisks_per_fail_domain: 1
+  storage_pool_types:
+  - kind: ssd
+    pool_config:
+      box_id: 1
+      erasure_species: block-4-2
+      kind: ssd
+      vdisk_kind: Default
+      geometry: *disk_scope_geometry
+      pdisk_filter:
+      - property:
+        - type: SSD
 ```
 
-При такой конфигурации на каждом сервере будут размещены по два VDisk'а каждой группы хранения, и максимальным отказом в такой конфигурации будет отказ одного сервера.
+В шаблонах `ydbd_slice` по-прежнему пишут `fail_domain_type: disk_scope` и `domains[].storage_pool_kinds[].fail_domain_type: disk_scope`. Это ключи шаблона, а не файла ConfigV2. Утилита подставляет геометрию выше, когда собирает конфигурацию кластера.
+
+При такой конфигурации на каждом сервере размещаются по два VDisk каждой группы хранения, и наибольший допустимый отказ — отказ одного сервера.
 
 ## Особенности Kubernetes {#host-configs-k8s}
 
