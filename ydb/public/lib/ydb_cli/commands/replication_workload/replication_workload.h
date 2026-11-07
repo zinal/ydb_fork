@@ -34,18 +34,6 @@ private:
     ui64 Threads = 1;
 };
 
-class TCommandWorkloadReplicationCompile : public TYdbCommand {
-public:
-    TCommandWorkloadReplicationCompile();
-    void Config(TConfig& config) override;
-    int Run(TConfig& config) override;
-
-private:
-    TString Path = "replication";
-    ui64 Threads = 0;
-    TString Timeout = "10s";
-};
-
 class TCommandWorkloadReplicationRun : public TYdbCommand {
 public:
     TCommandWorkloadReplicationRun();

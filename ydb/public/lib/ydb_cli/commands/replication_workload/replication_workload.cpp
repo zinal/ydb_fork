@@ -8,7 +8,6 @@ TCommandWorkloadReplication::TCommandWorkloadReplication()
     AddCommand(std::make_unique<TCommandWorkloadReplicationInit>());
     AddCommand(std::make_unique<TCommandWorkloadReplicationImport>());
     AddCommand(std::make_unique<TCommandWorkloadReplicationRun>());
-    AddCommand(std::make_unique<TCommandWorkloadReplicationCompile>());
     AddCommand(std::make_unique<TCommandWorkloadReplicationClean>());
 }
 

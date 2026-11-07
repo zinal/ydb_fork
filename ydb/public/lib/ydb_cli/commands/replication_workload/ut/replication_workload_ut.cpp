@@ -306,12 +306,64 @@ ui32 UpdateAssignmentCount(const TString& statement) {
     return count;
 }
 
+TVector<size_t> ValueIndexes(const TTable& table) {
+    TVector<size_t> indexes;
+    for (size_t i = 0; i < table.Columns.size(); ++i) {
+        if (!table.Columns[i].Key && table.Columns[i].Name != "seqno") {
+            indexes.push_back(i);
+        }
+    }
+    return indexes;
+}
+
+THashSet<TString> UpdateStatements(const TTable& table, const TString& fullName) {
+    const TColumn* seqno = nullptr;
+    for (const TColumn& column : table.Columns) {
+        if (column.Name == "seqno") {
+            seqno = &column;
+            break;
+        }
+    }
+    UNIT_ASSERT(seqno);
+    THashSet<TString> texts;
+    for (const TVector<size_t>& shape : UpdateValueColumnSets(table)) {
+        TVector<const TColumn*> assigned;
+        assigned.reserve(shape.size() + 1);
+        assigned.push_back(seqno);
+        for (size_t index : shape) {
+            assigned.push_back(&table.Columns[index]);
+        }
+        const TString text = UpdateQuery(fullName, table, assigned);
+        UNIT_ASSERT(texts.insert(text).second);
+        const size_t statement = text.find("UPDATE ");
+        UNIT_ASSERT(statement != TString::npos);
+        UNIT_ASSERT(text.substr(statement).find('\'') == TString::npos);
+    }
+    UNIT_ASSERT_VALUES_EQUAL(texts.size(), 5);
+    return texts;
+}
+
 Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
     const TVector<TTable>& tables = AllTables();
+    struct TAllowed {
+        TString Quoted;
+        THashSet<TString> Texts;
+        ui64 ValueColumns = 0;
+    };
+    TVector<TAllowed> allowed;
+    for (const TTable& table : tables) {
+        const TString fullName = JoinPath("/db/replication", table.Name);
+        allowed.push_back({
+            "`" + fullName + "`",
+            UpdateStatements(table, fullName),
+            ValueIndexes(table).size(),
+        });
+    }
+
     ui32 updates = 0;
-    ui32 twoColumns = 0;
+    ui32 oneColumn = 0;
     ui32 threeColumns = 0;
-    ui32 fourColumns = 0;
+    ui32 allColumns = 0;
     bool sawBoolKey = false;
     for (int seed = 0; seed < 40; ++seed) {
         TVector<TTableRuntime> state(tables.size());
@@ -331,15 +383,23 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
             UNIT_ASSERT(write.Statement.Contains("UPDATE "));
             UNIT_ASSERT(write.Statement.Contains("seqno = $seqno"));
             UNIT_ASSERT(write.Statement.Contains(" WHERE "));
+            const TAllowed* match = nullptr;
+            for (const TAllowed& candidate : allowed) {
+                if (write.Statement.Contains(candidate.Quoted)) {
+                    match = &candidate;
+                    break;
+                }
+            }
+            UNIT_ASSERT(match);
+            UNIT_ASSERT(match->Texts.contains(write.Statement));
             const ui32 assigned = UpdateAssignmentCount(write.Statement);
-            UNIT_ASSERT(assigned >= 2);
-            UNIT_ASSERT(assigned <= 4);
             if (assigned == 2) {
-                ++twoColumns;
-            } else if (assigned == 3) {
+                ++oneColumn;
+            } else if (assigned == 4) {
                 ++threeColumns;
             } else {
-                ++fourColumns;
+                UNIT_ASSERT_VALUES_EQUAL(assigned, match->ValueColumns + 1);
+                ++allColumns;
             }
             ui32 seqnoAssignments = 0;
             for (const TBoundParam& param : write.Params) {
@@ -359,9 +419,9 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
         }
     }
     UNIT_ASSERT(updates > 0);
-    UNIT_ASSERT(twoColumns > 0);
+    UNIT_ASSERT(oneColumn > 0);
     UNIT_ASSERT(threeColumns > 0);
-    UNIT_ASSERT(fourColumns > 0);
+    UNIT_ASSERT(allColumns > 0);
     UNIT_ASSERT(sawBoolKey);
 }
 
@@ -561,101 +621,81 @@ Y_UNIT_TEST(StatementsStayStable) {
     UNIT_ASSERT(repeated >= 1);
 }
 
-ui64 Choose(ui64 n, ui64 k) {
-    ui64 result = 1;
-    for (ui64 i = 1; i <= k; ++i) {
-        result = result * (n - k + i) / i;
+void AssertColumnNames(const TTable& table, const TVector<size_t>& indexes, std::initializer_list<const char*> names) {
+    UNIT_ASSERT_VALUES_EQUAL(indexes.size(), names.size());
+    size_t i = 0;
+    for (const char* name : names) {
+        UNIT_ASSERT_VALUES_EQUAL(table.Columns[indexes[i]].Name, name);
+        ++i;
     }
-    return result;
 }
 
-Y_UNIT_TEST(RunQueriesMatchRun) {
-    const TVector<TRunQuery> queries = RunQueries("/db/replication");
-    THashSet<TString> names;
-    THashSet<TString> texts;
-    ui64 upserts = 0;
-    for (const TRunQuery& query : queries) {
-        UNIT_ASSERT(names.insert(query.Name).second);
-        UNIT_ASSERT(texts.insert(query.Text).second);
-        UNIT_ASSERT(!query.Text.Contains("NULL"));
-        const size_t upsertPos = query.Text.find("UPSERT INTO");
-        const size_t updatePos = query.Text.find("UPDATE ");
-        UNIT_ASSERT((upsertPos == TString::npos) != (updatePos == TString::npos));
-        const size_t statement = upsertPos == TString::npos ? updatePos : upsertPos;
-        UNIT_ASSERT(query.Text.substr(statement).find('\'') == TString::npos);
-        if (upsertPos != TString::npos) {
-            ++upserts;
-            UNIT_ASSERT(query.Name.EndsWith(" upsert"));
-        } else {
-            UNIT_ASSERT(query.Text.Contains("seqno = $seqno"));
-            const ui32 assigned = UpdateAssignmentCount(query.Text);
-            UNIT_ASSERT(assigned >= 2);
-            UNIT_ASSERT(assigned <= 4);
-        }
-    }
-    UNIT_ASSERT_VALUES_EQUAL(upserts, AllTables().size());
-
-    ui64 expected = 0;
+Y_UNIT_TEST(FixedUpdateShapes) {
     for (const TTable& table : AllTables()) {
-        ui64 values = 0;
-        bool hasSeqno = false;
-        for (const TColumn& column : table.Columns) {
-            if (column.Name == "seqno") {
-                hasSeqno = true;
-            } else if (!column.Key) {
-                ++values;
-            }
+        const TVector<size_t> values = ValueIndexes(table);
+        UNIT_ASSERT(values.size() >= 4);
+        const TVector<TVector<size_t>> shapes = UpdateValueColumnSets(table);
+        UNIT_ASSERT_VALUES_EQUAL(shapes.size(), 5);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[0].size(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[1].size(), 1);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[0][0], values[0]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[1][0], values[1]);
+        UNIT_ASSERT(shapes[0][0] != shapes[1][0]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[2].size(), 3);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[3].size(), 3);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[2][0], values[0]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[2][1], values[1]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[2][2], values[2]);
+        const size_t n = values.size();
+        UNIT_ASSERT_VALUES_EQUAL(shapes[3][0], values[n - 3]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[3][1], values[n - 2]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[3][2], values[n - 1]);
+        UNIT_ASSERT(shapes[2] != shapes[3]);
+        UNIT_ASSERT_VALUES_EQUAL(shapes[4].size(), values.size());
+        for (size_t i = 0; i < values.size(); ++i) {
+            UNIT_ASSERT_VALUES_EQUAL(shapes[4][i], values[i]);
         }
-        UNIT_ASSERT(hasSeqno);
-        ++expected;
-        for (ui64 k = 1; k <= 3 && k <= values; ++k) {
-            expected += Choose(values, k);
-        }
-    }
-    UNIT_ASSERT_VALUES_EQUAL(queries.size(), expected);
-    UNIT_ASSERT_VALUES_EQUAL(expected, static_cast<ui64>(24566));
 
-    for (const TTable& table : AllTables()) {
-        std::mt19937_64 rng(1);
         const TString fullName = JoinPath("/db/replication", table.Name);
-        const TRowWrite write = MakeInsertWrite(table, fullName, 3, 9, rng);
-        UNIT_ASSERT_VALUES_EQUAL(write.Statement, InsertQuery(fullName, table));
-        UNIT_ASSERT(texts.contains(write.Statement));
-    }
-
-    const TVector<TTable>& tables = AllTables();
-    bool sawUpdate = false;
-    for (int i = 0; i < 30; ++i) {
-        TVector<TTableRuntime> state(tables.size());
-        for (TTableRuntime& runtime : state) {
-            runtime.Boundary = 30;
-        }
-        std::mt19937_64 rng(1000 + i);
-        const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 10 + i, 8, rng);
-        if (plan.Busy) {
-            continue;
-        }
-        for (const TRowWrite& write : plan.Writes) {
-            UNIT_ASSERT(texts.contains(write.Statement));
-            if (write.Update) {
-                sawUpdate = true;
+        const THashSet<TString> texts = UpdateStatements(table, fullName);
+        ui32 oneColumn = 0;
+        ui32 threeColumns = 0;
+        ui32 allColumns = 0;
+        for (const TString& text : texts) {
+            UNIT_ASSERT(text.Contains("seqno = $seqno"));
+            const ui32 assigned = UpdateAssignmentCount(text);
+            if (assigned == 2) {
+                ++oneColumn;
+            } else if (assigned == 4) {
+                ++threeColumns;
+            } else {
+                UNIT_ASSERT_VALUES_EQUAL(assigned, values.size() + 1);
+                ++allColumns;
             }
         }
+        UNIT_ASSERT_VALUES_EQUAL(oneColumn, 2);
+        UNIT_ASSERT_VALUES_EQUAL(threeColumns, 2);
+        UNIT_ASSERT_VALUES_EQUAL(allColumns, 1);
     }
-    UNIT_ASSERT(sawUpdate);
 
-    bool sawBoolWhere = false;
-    for (const TRunQuery& query : queries) {
-        if (!query.Name.StartsWith("pk_bool update ")) {
-            continue;
-        }
-        sawBoolWhere = true;
-        UNIT_ASSERT(query.Text.Contains("pk_seq_hash = $pk_seq_hash"));
-        UNIT_ASSERT(query.Text.Contains("pk = $pk"));
-        UNIT_ASSERT(query.Text.Contains("seq = $seq"));
-        break;
-    }
-    UNIT_ASSERT(sawBoolWhere);
+    const TTable* plain = Find("pk_uint64");
+    const TTable* wide = Find("wide_utf8");
+    const TTable* boolean = Find("pk_bool");
+    UNIT_ASSERT(plain && wide && boolean);
+    const TVector<TVector<size_t>> plainShapes = UpdateValueColumnSets(*plain);
+    AssertColumnNames(*plain, plainShapes[0], {"c_bool"});
+    AssertColumnNames(*plain, plainShapes[1], {"c_int64"});
+    AssertColumnNames(*plain, plainShapes[2], {"c_bool", "c_int64", "c_double"});
+    AssertColumnNames(*plain, plainShapes[3], {"c_string", "c_json", "c_timestamp"});
+    const TVector<TVector<size_t>> wideShapes = UpdateValueColumnSets(*wide);
+    AssertColumnNames(*wide, wideShapes[0], {"c_bool"});
+    AssertColumnNames(*wide, wideShapes[1], {"c_int8"});
+    AssertColumnNames(*wide, wideShapes[2], {"c_bool", "c_int8", "c_int16"});
+    AssertColumnNames(*wide, wideShapes[3], {"c_json", "c_medium", "c_wide"});
+    const TString boolQuery = *UpdateStatements(*boolean, "/db/replication/pk_bool").begin();
+    UNIT_ASSERT(boolQuery.Contains("pk_seq_hash = $pk_seq_hash"));
+    UNIT_ASSERT(boolQuery.Contains("pk = $pk"));
+    UNIT_ASSERT(boolQuery.Contains("seq = $seq"));
 }
 
 Y_UNIT_TEST(ReservationKeepsDensePrefix) {

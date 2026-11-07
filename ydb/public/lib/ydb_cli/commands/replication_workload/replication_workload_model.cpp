@@ -8,6 +8,8 @@
 #include <util/string/builder.h>
 #include <util/string/cast.h>
 
+#include <util/system/yassert.h>
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -1021,6 +1023,21 @@ TString UpdateQuery(const TString& fullName, const TTable& table, const TVector<
     return QueryText(sql, params);
 }
 
+TVector<TVector<size_t>> UpdateValueColumnSets(const TTable& table) {
+    const TVector<size_t> values = ValueColumnsExceptSeqno(table);
+    const size_t n = values.size();
+    // Two distinct single columns and two distinct triples need at least four
+    // value columns. Every workload table has more than that.
+    Y_ABORT_UNLESS(n >= 4);
+    TVector<TVector<size_t>> shapes;
+    shapes.push_back({values[0]});
+    shapes.push_back({values[1]});
+    shapes.push_back({values[0], values[1], values[2]});
+    shapes.push_back({values[n - 3], values[n - 2], values[n - 1]});
+    shapes.push_back(values);
+    return shapes;
+}
+
 TRowWrite MakeInsertWrite(
     const TTable& table,
     const TString& fullName,
@@ -1142,33 +1159,25 @@ TTxPlan BuildTransaction(
             const ui64 n = reservation->First + row;
             plan.Writes.push_back(MakeInsertWrite(table, fullName, n, seqno, rng));
         }
+        const TVector<TVector<size_t>> shapes = UpdateValueColumnSets(table);
+        std::uniform_int_distribution<size_t> shapePick(0, shapes.size() - 1);
         for (ui64 number : item.UpdateNumbers) {
             TRowWrite write;
             write.Update = true;
-            // seqno is always assigned, plus one, two, or three other value
-            // columns. The statement updates two, three, or four columns.
-            TVector<size_t> eligible = ValueColumnsExceptSeqno(table);
-            if (eligible.empty()) {
-                continue;
-            }
-            std::shuffle(eligible.begin(), eligible.end(), rng);
-            const int extras = std::min<int>(
-                std::uniform_int_distribution<int>(1, 3)(rng),
-                static_cast<int>(eligible.size()));
+            // seqno is always assigned. The other columns are one of the five
+            // fixed sets for this table.
+            const TVector<size_t>& valueColumns = shapes[shapePick(rng)];
             TVector<const TColumn*> chosen;
+            chosen.reserve(valueColumns.size() + 1);
             for (const TColumn& column : table.Columns) {
                 if (column.Name == "seqno") {
                     chosen.push_back(&column);
                     break;
                 }
             }
-            for (int i = 0; i < extras; ++i) {
-                chosen.push_back(&table.Columns[eligible[i]]);
+            for (size_t index : valueColumns) {
+                chosen.push_back(&table.Columns[index]);
             }
-            // Name order makes one column set produce one statement text.
-            std::sort(chosen.begin(), chosen.end(), [](const TColumn* left, const TColumn* right) {
-                return left->Name < right->Name;
-            });
             TVector<TBoundParam> params;
             for (const TColumn* column : chosen) {
                 TBoundParam value;
@@ -1195,89 +1204,6 @@ TTxPlan BuildTransaction(
         }
     }
     return plan;
-}
-
-namespace {
-
-bool NextCombination(TVector<size_t>& comb, size_t n) {
-    const size_t k = comb.size();
-    if (k == 0 || n < k) {
-        return false;
-    }
-    for (size_t pos = k; pos-- > 0;) {
-        const size_t limit = n - k + pos;
-        if (comb[pos] < limit) {
-            ++comb[pos];
-            for (size_t next = pos + 1; next < k; ++next) {
-                comb[next] = comb[next - 1] + 1;
-            }
-            return true;
-        }
-    }
-    return false;
-}
-
-} // namespace
-
-TVector<TRunQuery> RunQueries(const TString& pathPrefix) {
-    TVector<TRunQuery> queries;
-    for (const TTable& table : AllTables()) {
-        const TString fullName = JoinPath(pathPrefix, table.Name);
-        TRunQuery insert;
-        insert.Name = table.Name + " upsert";
-        insert.Text = InsertQuery(fullName, table);
-        queries.push_back(std::move(insert));
-
-        const TColumn* seqno = nullptr;
-        TVector<const TColumn*> values;
-        for (const TColumn& column : table.Columns) {
-            if (column.Name == "seqno") {
-                seqno = &column;
-            } else if (!column.Key) {
-                values.push_back(&column);
-            }
-        }
-        if (!seqno || values.empty()) {
-            continue;
-        }
-        const size_t n = values.size();
-        for (size_t k = 1; k <= 3 && k <= n; ++k) {
-            TVector<size_t> comb(k);
-            for (size_t i = 0; i < k; ++i) {
-                comb[i] = i;
-            }
-            auto emit = [&] {
-                TVector<const TColumn*> chosen;
-                chosen.reserve(k + 1);
-                chosen.push_back(seqno);
-                TVector<TString> setNames;
-                setNames.reserve(k + 1);
-                setNames.push_back("seqno");
-                for (size_t index : comb) {
-                    chosen.push_back(values[index]);
-                    setNames.push_back(values[index]->Name);
-                }
-                std::sort(setNames.begin(), setNames.end());
-                TStringBuilder name;
-                name << table.Name << " update ";
-                for (size_t i = 0; i < setNames.size(); ++i) {
-                    if (i) {
-                        name << ",";
-                    }
-                    name << setNames[i];
-                }
-                TRunQuery query;
-                query.Name = name;
-                query.Text = UpdateQuery(fullName, table, chosen);
-                queries.push_back(std::move(query));
-            };
-            emit();
-            while (NextCombination(comb, n)) {
-                emit();
-            }
-        }
-    }
-    return queries;
 }
 
 } // namespace NYdb::NConsoleClient::NReplicationWorkload
