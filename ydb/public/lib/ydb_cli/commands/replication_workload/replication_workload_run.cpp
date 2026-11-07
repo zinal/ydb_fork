@@ -65,12 +65,7 @@ i64 LoadBoundary(
     const TString& fullName,
     const TDuration& timeout)
 {
-    TString query;
-    if (table.Composite) {
-        query = "SELECT seq AS pk FROM " + QuotePath(fullName) + " ORDER BY seq DESC LIMIT 1;";
-    } else {
-        query = "SELECT COUNT(*) AS pk FROM " + QuotePath(fullName) + ";";
-    }
+    const TString query = BoundaryQuery(table, fullName);
     auto result = client.ExecuteQuery(
         query,
         ReadOnlyTx(),
@@ -404,6 +399,7 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
         throw TMisuseException() << "Window must be positive";
     }
     const TDuration pause = ParseDurationMilliseconds(Pause);
+    constexpr int InitPauseSec = 30;
     const TDuration timeout = ParseDurationMilliseconds(Timeout);
     const ui64 seed = Seed.empty() ? TInstant::Now().MicroSeconds() : FromString<ui64>(Seed);
 
@@ -416,11 +412,14 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
         NQuery::TSessionPoolSettings().MaxActiveSessions(Users + 4));
     NQuery::TQueryClient client(driver, clientSettings);
 
+    Cout << "init_started=" << TInstant::Now().ToIsoStringLocalUpToSeconds() << Endl;
     PrepareTpchText();
     TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, timeout, seed, config.IsVerbose());
     runner.Load(timeout);
     // The measured phase starts after this pause, once the boundary is loaded.
-    Sleep(TDuration::Seconds(30));
+    Cout << "init_finished=" << TInstant::Now().ToIsoStringLocalUpToSeconds()
+        << " pause_s=" << InitPauseSec << Endl;
+    Sleep(TDuration::Seconds(InitPauseSec));
     runner.SetSeqno(static_cast<ui64>(TInstant::Now().MicroSeconds()));
 
     const TInstant start = TInstant::Now();

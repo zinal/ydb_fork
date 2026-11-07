@@ -75,6 +75,23 @@ Y_UNIT_TEST(TableShapes) {
     UNIT_ASSERT_VALUES_EQUAL(composite, 7);
 }
 
+Y_UNIT_TEST(BoundaryCountUsesSeqnoIndex) {
+    const TTable* wide = Find("wide_json");
+    const TTable* plain = Find("pk_uint64");
+    const TTable* composite = Find("pk_bool");
+    UNIT_ASSERT(wide && plain && composite);
+    UNIT_ASSERT_VALUES_EQUAL(
+        BoundaryQuery(*wide, "/db/replication/wide_json"),
+        "SELECT COUNT(*) AS pk FROM `/db/replication/wide_json` VIEW seqno_idx;");
+    UNIT_ASSERT_VALUES_EQUAL(
+        BoundaryQuery(*plain, "/db/replication/pk_uint64"),
+        "SELECT COUNT(*) AS pk FROM `/db/replication/pk_uint64` VIEW seqno_idx;");
+    const TString compositeQuery = BoundaryQuery(*composite, "/db/replication/pk_bool");
+    UNIT_ASSERT(compositeQuery.Contains("ORDER BY seq DESC LIMIT 1"));
+    UNIT_ASSERT(!compositeQuery.Contains("COUNT"));
+    UNIT_ASSERT(!compositeQuery.Contains("VIEW"));
+}
+
 Y_UNIT_TEST(IndexesAndPartitions) {
     const TTable* narrow = Find("pk_bool");
     const TTable* plain = Find("pk_uint64");
@@ -395,11 +412,12 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
             const ui32 assigned = UpdateAssignmentCount(write.Statement);
             if (assigned == 2) {
                 ++oneColumn;
-            } else if (assigned == 4) {
+            } else if (assigned == match->ValueColumns + 1) {
+                ++allColumns;
+            } else if (assigned == 4 || assigned == 5) {
                 ++threeColumns;
             } else {
-                UNIT_ASSERT_VALUES_EQUAL(assigned, match->ValueColumns + 1);
-                ++allColumns;
+                UNIT_ASSERT(false);
             }
             ui32 seqnoAssignments = 0;
             for (const TBoundParam& param : write.Params) {
@@ -630,6 +648,12 @@ void AssertColumnNames(const TTable& table, const TVector<size_t>& indexes, std:
     }
 }
 
+void AssertFill(const TTable& table, const TVector<size_t>& indexes, EFill fill) {
+    for (size_t index : indexes) {
+        UNIT_ASSERT(table.Columns[index].Fill == fill);
+    }
+}
+
 Y_UNIT_TEST(FixedUpdateShapes) {
     for (const TTable& table : AllTables()) {
         const TVector<size_t> values = ValueIndexes(table);
@@ -638,43 +662,54 @@ Y_UNIT_TEST(FixedUpdateShapes) {
         UNIT_ASSERT_VALUES_EQUAL(shapes.size(), 5);
         UNIT_ASSERT_VALUES_EQUAL(shapes[0].size(), 1);
         UNIT_ASSERT_VALUES_EQUAL(shapes[1].size(), 1);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[0][0], values[0]);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[1][0], values[1]);
         UNIT_ASSERT(shapes[0][0] != shapes[1][0]);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[2].size(), 3);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[3].size(), 3);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[2][0], values[0]);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[2][1], values[1]);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[2][2], values[2]);
-        const size_t n = values.size();
-        UNIT_ASSERT_VALUES_EQUAL(shapes[3][0], values[n - 3]);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[3][1], values[n - 2]);
-        UNIT_ASSERT_VALUES_EQUAL(shapes[3][2], values[n - 1]);
         UNIT_ASSERT(shapes[2] != shapes[3]);
         UNIT_ASSERT_VALUES_EQUAL(shapes[4].size(), values.size());
         for (size_t i = 0; i < values.size(); ++i) {
             UNIT_ASSERT_VALUES_EQUAL(shapes[4][i], values[i]);
         }
+        if (table.Wide) {
+            UNIT_ASSERT(table.Columns[shapes[0][0]].Fill == EFill::Wide);
+            UNIT_ASSERT(table.Columns[shapes[1][0]].Fill == EFill::None);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[2].size(), 4);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[3].size(), 4);
+            UNIT_ASSERT(table.Columns[shapes[2].back()].Fill == EFill::Medium);
+            AssertFill(table, {shapes[2][0], shapes[2][1], shapes[2][2]}, EFill::None);
+            AssertFill(table, shapes[3], EFill::None);
+        } else {
+            UNIT_ASSERT_VALUES_EQUAL(shapes[0][0], values[0]);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[1][0], values[1]);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[2].size(), 3);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[3].size(), 3);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[2][0], values[0]);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[2][1], values[1]);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[2][2], values[2]);
+            const size_t n = values.size();
+            UNIT_ASSERT_VALUES_EQUAL(shapes[3][0], values[n - 3]);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[3][1], values[n - 2]);
+            UNIT_ASSERT_VALUES_EQUAL(shapes[3][2], values[n - 1]);
+        }
 
         const TString fullName = JoinPath("/db/replication", table.Name);
         const THashSet<TString> texts = UpdateStatements(table, fullName);
         ui32 oneColumn = 0;
-        ui32 threeColumns = 0;
+        ui32 partial = 0;
         ui32 allColumns = 0;
+        const ui32 partialColumns = table.Wide ? 5 : 4;
         for (const TString& text : texts) {
             UNIT_ASSERT(text.Contains("seqno = $seqno"));
             const ui32 assigned = UpdateAssignmentCount(text);
             if (assigned == 2) {
                 ++oneColumn;
-            } else if (assigned == 4) {
-                ++threeColumns;
+            } else if (assigned == partialColumns) {
+                ++partial;
             } else {
                 UNIT_ASSERT_VALUES_EQUAL(assigned, values.size() + 1);
                 ++allColumns;
             }
         }
         UNIT_ASSERT_VALUES_EQUAL(oneColumn, 2);
-        UNIT_ASSERT_VALUES_EQUAL(threeColumns, 2);
+        UNIT_ASSERT_VALUES_EQUAL(partial, 2);
         UNIT_ASSERT_VALUES_EQUAL(allColumns, 1);
     }
 
@@ -688,10 +723,10 @@ Y_UNIT_TEST(FixedUpdateShapes) {
     AssertColumnNames(*plain, plainShapes[2], {"c_bool", "c_int64", "c_double"});
     AssertColumnNames(*plain, plainShapes[3], {"c_string", "c_json", "c_timestamp"});
     const TVector<TVector<size_t>> wideShapes = UpdateValueColumnSets(*wide);
-    AssertColumnNames(*wide, wideShapes[0], {"c_bool"});
-    AssertColumnNames(*wide, wideShapes[1], {"c_int8"});
-    AssertColumnNames(*wide, wideShapes[2], {"c_bool", "c_int8", "c_int16"});
-    AssertColumnNames(*wide, wideShapes[3], {"c_json", "c_medium", "c_wide"});
+    AssertColumnNames(*wide, wideShapes[0], {"c_wide"});
+    AssertColumnNames(*wide, wideShapes[1], {"c_bool"});
+    AssertColumnNames(*wide, wideShapes[2], {"c_bool", "c_int8", "c_int16", "c_medium"});
+    AssertColumnNames(*wide, wideShapes[3], {"c_bool", "c_int8", "c_int16", "c_int32"});
     const TString boolQuery = *UpdateStatements(*boolean, "/db/replication/pk_bool").begin();
     UNIT_ASSERT(boolQuery.Contains("pk_seq_hash = $pk_seq_hash"));
     UNIT_ASSERT(boolQuery.Contains("pk = $pk"));

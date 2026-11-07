@@ -177,6 +177,9 @@ TString JoinPath(const TString& left, const TString& right);
 
 TString CreateTableQuery(const TString& fullName, const TTable& table, ui64 minPartitions, ui64 maxPartitions);
 TVector<TString> AlterIndexQueries(const TString& fullName, const TTable& table, ui64 minPartitions, ui64 maxPartitions);
+// Row count for a single-column key reads the seqno index. A composite key
+// reads the greatest seq instead, because the boundary is that value.
+TString BoundaryQuery(const TTable& table, const TString& fullName);
 
 ui64 HashSeqno(ui64 seqno);
 // Hash of the key columns (pk, seq) for pk_bool and pk_decimal_narrow.
@@ -202,10 +205,13 @@ TString InsertQuery(const TString& fullName, const TTable& table);
 // `assigned` includes seqno and the other value columns of one update shape.
 TString UpdateQuery(const TString& fullName, const TTable& table, const TVector<const TColumn*>& assigned);
 // Five fixed sets of value columns for UPDATE, not including seqno.
-// seqno is always assigned as well. Value columns are the non-key columns
-// other than seqno, in table order:
-// the first column, the second column, the first three, the last three,
-// and every value column.
+// seqno is always assigned as well.
+// Ordinary tables use value-column order: the first column, the second,
+// the first three, the last three, and every value column.
+// Wide tables: c_wide; the first ordinary column; c_medium plus the first
+// three ordinary columns; the first four ordinary columns; every value column.
+// An ordinary column has no text fill. The two middle wide shapes therefore
+// assign five columns once seqno is included.
 TVector<TVector<size_t>> UpdateValueColumnSets(const TTable& table);
 
 TString ImportQuery(const TString& fullName, const TTable& table);

@@ -665,6 +665,15 @@ TVector<TString> AlterIndexQueries(const TString& fullName, const TTable& table,
     return queries;
 }
 
+TString BoundaryQuery(const TTable& table, const TString& fullName) {
+    if (table.Composite) {
+        return "SELECT seq AS pk FROM " + QuotePath(fullName) + " ORDER BY seq DESC LIMIT 1;";
+    }
+    // The seqno index holds one small row per table row, so the count does not
+    // scan the wide primary-key rows.
+    return "SELECT COUNT(*) AS pk FROM " + QuotePath(fullName) + " VIEW seqno_idx;";
+}
+
 ui64 HashSeqno(ui64 seqno) {
     ui64 x = seqno + 0x9e3779b97f4a7c15ull;
     x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
@@ -1023,12 +1032,40 @@ TString UpdateQuery(const TString& fullName, const TTable& table, const TVector<
     return QueryText(sql, params);
 }
 
+TVector<size_t> ColumnsWithFill(const TTable& table, EFill fill) {
+    TVector<size_t> indexes;
+    for (size_t i = 0; i < table.Columns.size(); ++i) {
+        const TColumn& column = table.Columns[i];
+        if (!column.Key && column.Name != "seqno" && column.Fill == fill) {
+            indexes.push_back(i);
+        }
+    }
+    return indexes;
+}
+
 TVector<TVector<size_t>> UpdateValueColumnSets(const TTable& table) {
     const TVector<size_t> values = ValueColumnsExceptSeqno(table);
     const size_t n = values.size();
     // Two distinct single columns and two distinct triples need at least four
     // value columns. Every workload table has more than that.
     Y_ABORT_UNLESS(n >= 4);
+    if (table.Wide) {
+        const TVector<size_t> ordinary = ColumnsWithFill(table, EFill::None);
+        const TVector<size_t> medium = ColumnsWithFill(table, EFill::Medium);
+        const TVector<size_t> wide = ColumnsWithFill(table, EFill::Wide);
+        // Four ordinary columns make a five-column SET with seqno, and another
+        // five-column SET replaces the last of them with c_medium.
+        Y_ABORT_UNLESS(ordinary.size() >= 4);
+        Y_ABORT_UNLESS(medium.size() == 1);
+        Y_ABORT_UNLESS(wide.size() == 1);
+        TVector<TVector<size_t>> shapes;
+        shapes.push_back({wide[0]});
+        shapes.push_back({ordinary[0]});
+        shapes.push_back({ordinary[0], ordinary[1], ordinary[2], medium[0]});
+        shapes.push_back({ordinary[0], ordinary[1], ordinary[2], ordinary[3]});
+        shapes.push_back(values);
+        return shapes;
+    }
     TVector<TVector<size_t>> shapes;
     shapes.push_back({values[0]});
     shapes.push_back({values[1]});
