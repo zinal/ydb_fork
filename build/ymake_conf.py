@@ -874,6 +874,12 @@ class YMake(object):
             print(fin.read())
 
     def print_core_conf(self):
+        # python.conf's when ($BUILD_PYTHON3_BIN) is decided while this import is parsed.
+        # -D in the epilogue is too late: commands already point at the resource python.
+        for key in ("BUILD_PYTHON3_BIN", "BUILD_PYTHON_BIN"):
+            value = opts().presets.get(key)
+            if value:
+                emit(key, value)
         print('@import "${CONF_ROOT}/ymake.core.conf"')
 
     def print_settings(self):
@@ -1352,7 +1358,7 @@ class GnuToolchain(Toolchain):
 
         if target.is_zephyr_armv7_cortex_a35:
             self.c_flags_platform.append('-march=armv8-a -mthumb -mabi=aapcs -mfpu=neon-fp-armv8 -mfloat-abi=hard')
-            self.setup_zephyr_armv7()
+            self.setup_zephyr()
 
         if target.is_riscv32_esp32p4:
             self.c_flags_platform.extend([
@@ -1447,8 +1453,8 @@ class GnuToolchain(Toolchain):
     def setup_actions_zephyr_sdk(self):
         self.platform_projects.insert(0, 'build/internal/platform/actions_zephyr')
 
-    def setup_zephyr_armv7(self):
-        self.platform_projects.insert(0, 'build/internal/platform/zephyr_armv7')
+    def setup_zephyr(self):
+        self.platform_projects.insert(0, 'build/internal/platform/zephyr')
 
     def setup_allwinner_rtos_sdk(self):
         self.platform_projects.insert(0, 'build/internal/platform/allwinner_rtos')
@@ -1826,7 +1832,6 @@ class SwiftCompiler(object):
 class Linker(object):
     BFD = 'bfd'
     LLD = 'lld'
-    GOLD = 'gold'
     MOLD = 'mold'
 
     def __init__(self, tc, build):
@@ -1854,8 +1859,8 @@ class Linker(object):
             and self.build.target.is_rv32imc_zicsr_zifencei
             and (self.build.target.is_none or self.build.target.is_freertos)
         ):
-            # The ESP Clang SDK uses GNU ld, including its linker map format.
-            return Linker.BFD
+            # Use LLD shipped with the ESP Clang SDK.
+            return Linker.LLD
 
         if self.build.target.is_android:
             # Android toolchain is NDK, LLD works on all supported platforms
@@ -1922,7 +1927,7 @@ class LD(Linker):
 
         self.ld_flags = []
         if self.tc.is_clang and target.is_rv32imc_zicsr_zifencei:
-            self.ld_flags.append('--ld-path={}/esp-clang/bin/riscv32-esp-elf-clang-ld'.format(self.tc.name_marker))
+            self.ld_flags.append('--ld-path={}/esp-clang/bin/ld.lld'.format(self.tc.name_marker))
             if is_positive('NO_CXX_RTTI'):
                 self.ld_flags.append('-fno-rtti')
         if not self.build.is_release and target.is_linux:
