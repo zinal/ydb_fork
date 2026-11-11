@@ -378,6 +378,8 @@ void TCommandWorkloadReplicationRun::Config(TConfig& config) {
         .DefaultValue(MaxRecords).StoreResult(&MaxRecords);
     config.Opts->AddLongOption("pause", "Per-user pause between transactions. A plain number is milliseconds")
         .DefaultValue(Pause).StoreResult(&Pause);
+    config.Opts->AddLongOption("init-pause", "Pause between initialization and the measured run. A plain number is seconds")
+        .DefaultValue(InitPause).StoreResult(&InitPause);
     config.Opts->AddLongOption("threads", "Client pool threads. 0 selects the adaptive pool")
         .DefaultValue(Threads).StoreResult(&Threads);
     config.Opts->AddLongOption("window", "Rate output window, seconds")
@@ -399,7 +401,7 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
         throw TMisuseException() << "Window must be positive";
     }
     const TDuration pause = ParseDurationMilliseconds(Pause);
-    constexpr int InitPauseSec = 30;
+    const TDuration initPause = ParseDurationSeconds(InitPause);
     const TDuration timeout = ParseDurationMilliseconds(Timeout);
     const ui64 seed = Seed.empty() ? TInstant::Now().MicroSeconds() : FromString<ui64>(Seed);
 
@@ -417,9 +419,10 @@ int TCommandWorkloadReplicationRun::Run(TConfig& config) {
     TRunner runner(client, WorkloadRoot(config.Database, Path), Users, MaxRecords, pause, timeout, seed, config.IsVerbose());
     runner.Load(timeout);
     // The measured phase starts after this pause, once the boundary is loaded.
+    const double initPauseSec = static_cast<double>(initPause.MicroSeconds()) / 1000000.0;
     Cout << "init_finished=" << TInstant::Now().ToIsoStringLocalUpToSeconds()
-        << " pause_s=" << InitPauseSec << Endl;
-    Sleep(TDuration::Seconds(InitPauseSec));
+        << " pause_s=" << Sprintf("%.6g", initPauseSec) << Endl;
+    Sleep(initPause);
     runner.SetSeqno(static_cast<ui64>(TInstant::Now().MicroSeconds()));
 
     const TInstant start = TInstant::Now();

@@ -46,6 +46,7 @@ private:
     ui64 Users = 1;
     ui64 MaxRecords = 10;
     TString Pause = "100ms";
+    TString InitPause = "60s";
     ui64 Threads = 0;
     ui64 WindowSec = 1;
     TString Seed;
