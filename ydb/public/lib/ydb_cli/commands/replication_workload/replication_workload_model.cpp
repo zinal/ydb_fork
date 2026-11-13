@@ -1088,37 +1088,125 @@ TRowWrite MakeInsertWrite(
     return write;
 }
 
-bool TryReserve(TVector<TTableRuntime>& state, const TVector<std::pair<size_t, ui64>>& inserts, TVector<TReservation>& out) {
-    for (const auto& item : inserts) {
-        if (state[item.first].InsertBusy) {
-            return false;
-        }
+namespace {
+
+void PrepareKeyRanges(TTableRuntime& table) {
+    if (table.Prepared) {
+        return;
     }
+    table.Prepared = true;
+    if (table.Boundary < 0) {
+        return;
+    }
+    const ui64 rows = static_cast<ui64>(table.Boundary) + 1;
+    table.Committed.push_back(TKeyRange{0, rows});
+    table.CommittedRows = rows;
+    table.Next = rows;
+}
+
+// ranges stay sorted and non-overlapping. Touching intervals are merged.
+void AddRange(TVector<TKeyRange>& ranges, ui64 first, ui64 count) {
+    if (count == 0) {
+        return;
+    }
+    TKeyRange incoming{first, count};
+    TVector<TKeyRange> merged;
+    merged.reserve(ranges.size() + 1);
+    bool placed = false;
+    for (const TKeyRange& range : ranges) {
+        const ui64 rangeEnd = range.First + range.Count;
+        const ui64 incomingEnd = incoming.First + incoming.Count;
+        if (rangeEnd < incoming.First) {
+            merged.push_back(range);
+            continue;
+        }
+        if (incomingEnd < range.First) {
+            if (!placed) {
+                merged.push_back(incoming);
+                placed = true;
+            }
+            merged.push_back(range);
+            continue;
+        }
+        const ui64 begin = std::min(range.First, incoming.First);
+        const ui64 end = std::max(rangeEnd, incomingEnd);
+        incoming = TKeyRange{begin, end - begin};
+    }
+    if (!placed) {
+        merged.push_back(incoming);
+    }
+    ranges.swap(merged);
+}
+
+ui64 CountKeys(const TVector<TKeyRange>& ranges) {
+    ui64 rows = 0;
+    for (const TKeyRange& range : ranges) {
+        rows += range.Count;
+    }
+    return rows;
+}
+
+TKeyRange TakeRange(TTableRuntime& table, ui64 count) {
+    for (size_t i = 0; i < table.Free.size(); ++i) {
+        TKeyRange& range = table.Free[i];
+        if (range.Count < count) {
+            continue;
+        }
+        const TKeyRange taken{range.First, count};
+        range.First += count;
+        range.Count -= count;
+        if (range.Count == 0) {
+            table.Free.erase(table.Free.begin() + i);
+        }
+        return taken;
+    }
+    const TKeyRange taken{table.Next, count};
+    table.Next += count;
+    return taken;
+}
+
+ui64 KeyForSlot(const TTableRuntime& table, ui64 slot) {
+    ui64 left = slot;
+    for (const TKeyRange& range : table.Committed) {
+        if (left < range.Count) {
+            return range.First + left;
+        }
+        left -= range.Count;
+    }
+    ythrow yexception() << "committed row slot is out of range";
+}
+
+} // namespace
+
+void AllocateInserts(TVector<TTableRuntime>& state, const TVector<std::pair<size_t, ui64>>& inserts, TVector<TReservation>& out) {
     out.clear();
     for (const auto& item : inserts) {
+        if (item.second == 0) {
+            continue;
+        }
         TTableRuntime& table = state[item.first];
-        table.InsertBusy = true;
+        PrepareKeyRanges(table);
+        const TKeyRange range = TakeRange(table, item.second);
         TReservation reservation;
         reservation.TableIndex = item.first;
-        reservation.First = static_cast<ui64>(table.Boundary + 1);
-        reservation.Count = item.second;
+        reservation.First = range.First;
+        reservation.Count = range.Count;
         out.push_back(reservation);
     }
-    return true;
 }
 
 void ApplyReservations(TVector<TTableRuntime>& state, const TVector<TReservation>& reservations, bool success) {
     for (const TReservation& reservation : reservations) {
+        if (reservation.Count == 0) {
+            continue;
+        }
         TTableRuntime& table = state[reservation.TableIndex];
-        table.InsertBusy = false;
-        if (success && reservation.Count > 0) {
-            table.Boundary = static_cast<i64>(reservation.First + reservation.Count - 1);
+        PrepareKeyRanges(table);
+        AddRange(success ? table.Committed : table.Free, reservation.First, reservation.Count);
+        if (success) {
+            table.CommittedRows = CountKeys(table.Committed);
         }
     }
-}
-
-ui64 ExistingRows(i64 boundary) {
-    return boundary < 0 ? 0 : static_cast<ui64>(boundary) + 1;
 }
 
 TTxPlan BuildTransaction(
@@ -1152,10 +1240,11 @@ TTxPlan BuildTransaction(
     TVector<std::pair<size_t, ui64>> insertRequests;
     std::uniform_int_distribution<ui64> recordCount(1, std::max<ui64>(1, maxRecords));
     for (size_t index : indexes) {
+        PrepareKeyRanges(state[index]);
         const ui64 records = recordCount(rng);
         const ui64 plannedInserts = records / 2;
         const ui64 plannedUpdatesRaw = records - plannedInserts;
-        const ui64 existing = ExistingRows(state[index].Boundary);
+        const ui64 existing = state[index].CommittedRows;
         const ui64 plannedUpdates = std::min(plannedUpdatesRaw, existing);
         const ui64 inserts = plannedInserts + (plannedUpdatesRaw - plannedUpdates);
         TTableWork item;
@@ -1163,9 +1252,9 @@ TTxPlan BuildTransaction(
         item.Inserts = inserts;
         if (plannedUpdates > 0) {
             THashSet<ui64> used;
-            std::uniform_int_distribution<ui64> pick(0, static_cast<ui64>(state[index].Boundary));
+            std::uniform_int_distribution<ui64> pick(0, existing - 1);
             while (used.size() < plannedUpdates) {
-                used.insert(pick(rng));
+                used.insert(KeyForSlot(state[index], pick(rng)));
             }
             item.UpdateNumbers.assign(used.begin(), used.end());
         }
@@ -1174,10 +1263,7 @@ TTxPlan BuildTransaction(
         }
         work.push_back(std::move(item));
     }
-    if (!TryReserve(state, insertRequests, plan.Reservations)) {
-        plan.Busy = true;
-        return plan;
-    }
+    AllocateInserts(state, insertRequests, plan.Reservations);
     for (const TReservation& reservation : plan.Reservations) {
         plan.InsertTables.push_back(reservation.TableIndex);
     }

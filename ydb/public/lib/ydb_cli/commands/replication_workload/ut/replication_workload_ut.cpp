@@ -389,7 +389,6 @@ Y_UNIT_TEST(UpdateAssignsSeqnoAndAnotherColumn) {
         }
         std::mt19937_64 rng(5 + seed);
         const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 100 + seed, 4, rng);
-        UNIT_ASSERT(!plan.Busy);
         UNIT_ASSERT(!plan.Writes.empty());
         for (const TRowWrite& write : plan.Writes) {
             if (!write.Update) {
@@ -520,9 +519,6 @@ Y_UNIT_TEST(UpdateNullsOneAssignedValue) {
             table.Boundary = 30;
         }
         const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 1000 + i, 4, rng);
-        if (plan.Busy) {
-            continue;
-        }
         for (const TRowWrite& write : plan.Writes) {
             ui32 nulls = 0;
             for (const TBoundParam& param : write.Params) {
@@ -605,9 +601,6 @@ Y_UNIT_TEST(StatementsStayStable) {
         }
         std::mt19937_64 rng(100 + i);
         const TTxPlan plan = BuildTransaction(tables, state, "/db/replication", 500 + i, 10, rng);
-        if (plan.Busy) {
-            continue;
-        }
         THashMap<TString, ui32> upsertsByTable;
         for (const TRowWrite& write : plan.Writes) {
             const bool upsert = write.Statement.Contains("UPSERT INTO");
@@ -733,19 +726,129 @@ Y_UNIT_TEST(FixedUpdateShapes) {
     UNIT_ASSERT(boolQuery.Contains("seq = $seq"));
 }
 
-Y_UNIT_TEST(ReservationKeepsDensePrefix) {
+bool HoldsKey(const TVector<TKeyRange>& ranges, ui64 key) {
+    for (const TKeyRange& range : ranges) {
+        if (key >= range.First && key < range.First + range.Count) {
+            return true;
+        }
+    }
+    return false;
+}
+
+Y_UNIT_TEST(InsertRangesStayDisjoint) {
     TVector<TTableRuntime> state(1);
-    TVector<TReservation> reserved;
-    UNIT_ASSERT(TryReserve(state, {{0, 3}}, reserved));
-    UNIT_ASSERT(state[0].InsertBusy);
-    UNIT_ASSERT_VALUES_EQUAL(reserved[0].First, 0);
-    UNIT_ASSERT(!TryReserve(state, {{0, 1}}, reserved));
-    ApplyReservations(state, reserved, false);
-    UNIT_ASSERT(!state[0].InsertBusy);
-    UNIT_ASSERT_VALUES_EQUAL(state[0].Boundary, -1);
-    UNIT_ASSERT(TryReserve(state, {{0, 2}}, reserved));
-    ApplyReservations(state, reserved, true);
-    UNIT_ASSERT_VALUES_EQUAL(state[0].Boundary, 1);
+    TVector<TReservation> first;
+    TVector<TReservation> second;
+    AllocateInserts(state, {{0, 3}}, first);
+    AllocateInserts(state, {{0, 2}}, second);
+    UNIT_ASSERT_VALUES_EQUAL(first.size(), 1);
+    UNIT_ASSERT_VALUES_EQUAL(first[0].First, 0);
+    UNIT_ASSERT_VALUES_EQUAL(first[0].Count, 3);
+    UNIT_ASSERT_VALUES_EQUAL(second[0].First, 3);
+    UNIT_ASSERT_VALUES_EQUAL(second[0].Count, 2);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].CommittedRows, 0);
+
+    ApplyReservations(state, first, false);
+    ApplyReservations(state, second, true);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].CommittedRows, 2);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Committed.size(), 1);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Committed[0].First, 3);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Committed[0].Count, 2);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Free.size(), 1);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Free[0].First, 0);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Free[0].Count, 3);
+
+    TVector<TReservation> reused;
+    AllocateInserts(state, {{0, 2}}, reused);
+    UNIT_ASSERT_VALUES_EQUAL(reused[0].First, 0);
+    UNIT_ASSERT_VALUES_EQUAL(reused[0].Count, 2);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Free.size(), 1);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Free[0].First, 2);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].Free[0].Count, 1);
+
+    const TTable* boolean = Find("pk_bool");
+    UNIT_ASSERT(boolean);
+    TVector<TTable> oneTable;
+    oneTable.push_back(*boolean);
+    std::mt19937_64 rng(7);
+    bool saw3 = false;
+    bool saw4 = false;
+    for (int i = 0; i < 40; ++i) {
+        const TTxPlan plan = BuildTransaction(oneTable, state, "/db/replication", 50 + i, 1, rng);
+        UNIT_ASSERT_VALUES_EQUAL(plan.Writes.size(), 1);
+        UNIT_ASSERT(plan.Writes[0].Update);
+        UNIT_ASSERT(plan.Reservations.empty());
+        const TBoundParam* seq = FindParam(plan.Writes[0].Params, "seq");
+        UNIT_ASSERT(seq);
+        UNIT_ASSERT(seq->U == 3 || seq->U == 4);
+        saw3 = saw3 || seq->U == 3;
+        saw4 = saw4 || seq->U == 4;
+    }
+    UNIT_ASSERT(saw3);
+    UNIT_ASSERT(saw4);
+
+    ApplyReservations(state, reused, true);
+    UNIT_ASSERT_VALUES_EQUAL(state[0].CommittedRows, 4);
+    UNIT_ASSERT(!HoldsKey(state[0].Committed, 2));
+    THashSet<ui64> seen;
+    for (int i = 0; i < 80; ++i) {
+        const TTxPlan plan = BuildTransaction(oneTable, state, "/db/replication", 200 + i, 1, rng);
+        const TBoundParam* seq = FindParam(plan.Writes[0].Params, "seq");
+        UNIT_ASSERT(seq);
+        UNIT_ASSERT(seq->U != 2);
+        UNIT_ASSERT(HoldsKey(state[0].Committed, seq->U));
+        seen.insert(seq->U);
+    }
+    UNIT_ASSERT_VALUES_EQUAL(seen.size(), 4);
+
+    const TVector<TTable>& tables = AllTables();
+    TVector<TTableRuntime> many(tables.size());
+    for (TTableRuntime& table : many) {
+        table.Boundary = 20;
+    }
+    std::mt19937_64 left(1);
+    std::mt19937_64 right(2);
+    const TTxPlan earlier = BuildTransaction(tables, many, "/db/replication", 1, 10, left);
+    const TTxPlan later = BuildTransaction(tables, many, "/db/replication", 2, 10, right);
+    UNIT_ASSERT(!earlier.Writes.empty());
+    UNIT_ASSERT(!later.Writes.empty());
+    THashMap<size_t, THashSet<ui64>> keys;
+    size_t boolIndex = tables.size();
+    for (size_t i = 0; i < tables.size(); ++i) {
+        if (tables[i].Name == "pk_bool") {
+            boolIndex = i;
+        }
+    }
+    UNIT_ASSERT(boolIndex < tables.size());
+    auto take = [&](const TTxPlan& plan) {
+        THashSet<ui64> boolInserted;
+        for (const TReservation& reservation : plan.Reservations) {
+            for (ui64 row = 0; row < reservation.Count; ++row) {
+                const ui64 key = reservation.First + row;
+                UNIT_ASSERT(keys[reservation.TableIndex].insert(key).second);
+                if (reservation.TableIndex == boolIndex) {
+                    boolInserted.insert(key);
+                }
+            }
+        }
+        for (const TRowWrite& write : plan.Writes) {
+            const bool boolWrite = write.Statement.Contains("UPSERT INTO `/db/replication/pk_bool`")
+                || write.Statement.Contains("UPDATE `/db/replication/pk_bool`");
+            if (!boolWrite) {
+                continue;
+            }
+            const TBoundParam* seq = FindParam(write.Params, "seq");
+            UNIT_ASSERT(seq);
+            if (write.Update) {
+                UNIT_ASSERT(seq->U <= 20);
+            } else {
+                UNIT_ASSERT(boolInserted.contains(seq->U));
+            }
+        }
+    };
+    take(earlier);
+    take(later);
+    UNIT_ASSERT(!keys.empty());
 }
 
 }

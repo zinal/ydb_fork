@@ -9,7 +9,6 @@
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/types/status/status.h>
 #include <ydb/public/sdk/cpp/include/ydb-cpp-sdk/client/value/value.h>
 
-#include <util/generic/hash_set.h>
 #include <util/generic/yexception.h>
 #include <util/string/printf.h>
 #include <util/string/cast.h>
@@ -243,16 +242,9 @@ private:
     }
 
     void OnStart(size_t user) {
-        if (Waiting.count(user)) {
-            return;
-        }
         TTxPlan plan = BuildTransaction(Tables, State, Root, NextSeqno.fetch_add(1), MaxRecords, Rng[user]);
-        if (plan.Busy) {
-            NextSeqno.fetch_sub(1);
-            Waiting.insert(user);
-            return;
-        }
         if (plan.Writes.empty()) {
+            ApplyReservations(State, plan.Reservations, false);
             Schedule(user, Pause);
             return;
         }
@@ -312,19 +304,10 @@ private:
             std::lock_guard lock(Mutex);
             --InFlight;
         }
-        WakeWaiting();
         if (!Stopping.load() && TInstant::Now() < StopAt) {
             Schedule(event.User, Pause);
         } else {
             Cond.notify_all();
-        }
-    }
-
-    void WakeWaiting() {
-        TVector<size_t> pending(Waiting.begin(), Waiting.end());
-        Waiting.clear();
-        for (size_t user : pending) {
-            OnStart(user);
         }
     }
 
@@ -352,7 +335,6 @@ private:
     TInstant StopAt;
     std::atomic<bool> Stopping{false};
     int InFlight = 0;
-    THashSet<size_t> Waiting;
     std::mutex Mutex;
     std::condition_variable Cond;
     std::priority_queue<TEvent, std::vector<TEvent>, TEventLater> Queue;

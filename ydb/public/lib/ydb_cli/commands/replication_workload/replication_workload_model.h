@@ -156,13 +156,28 @@ struct TReservation {
     ui64 Count = 0;
 };
 
+// A half-open row-number interval [First, First + Count).
+struct TKeyRange {
+    ui64 First = 0;
+    ui64 Count = 0;
+};
+
+// Row numbers of one table. Boundary is the dense prefix loaded from the
+// table: keys 0..Boundary exist, and Boundary < 0 means the table is empty.
+// The first plan that touches the table copies that prefix into Committed.
+// Inserts then take a disjoint range from Free, or from Next when Free has
+// no fitting range. A failed transaction returns its range to Free. A
+// committed range joins Committed, and UPDATE reads only those keys.
 struct TTableRuntime {
     i64 Boundary = -1;
-    bool InsertBusy = false;
+    ui64 Next = 0;
+    ui64 CommittedRows = 0;
+    TVector<TKeyRange> Free;
+    TVector<TKeyRange> Committed;
+    bool Prepared = false;
 };
 
 struct TTxPlan {
-    bool Busy = false;
     ui64 Seqno = 0;
     TVector<TRowWrite> Writes;
     TVector<TReservation> Reservations;
@@ -221,7 +236,11 @@ TVector<TVector<TBoundParam>> MakeImportRows(
     ui64 count,
     std::mt19937_64& rng);
 
-bool TryReserve(TVector<TTableRuntime>& state, const TVector<std::pair<size_t, ui64>>& inserts, TVector<TReservation>& out);
+// Hands each insert a disjoint row-number range. Another transaction inserting
+// into the same table does not make this call fail.
+void AllocateInserts(TVector<TTableRuntime>& state, const TVector<std::pair<size_t, ui64>>& inserts, TVector<TReservation>& out);
+// Success adds the ranges to the keys UPDATE may read. Failure returns them
+// to the free list so a later insert can use the same numbers.
 void ApplyReservations(TVector<TTableRuntime>& state, const TVector<TReservation>& reservations, bool success);
 
 TTxPlan BuildTransaction(
@@ -231,7 +250,5 @@ TTxPlan BuildTransaction(
     ui64 seqno,
     ui64 maxRecords,
     std::mt19937_64& rng);
-
-ui64 ExistingRows(i64 boundary);
 
 } // namespace NYdb::NConsoleClient::NReplicationWorkload
