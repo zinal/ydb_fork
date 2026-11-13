@@ -1,3 +1,4 @@
+* Fixed a crash when searching documentation in interactive AI mode.
 * Added `ydb workload replication` command to generate multi-table write load for asynchronous replication tests. Each table is updated with five fixed statements. On a wide table those statements assign `seqno` with `c_wide`, with one ordinary column, with `c_medium` and three ordinary columns, with four ordinary columns, or with every value column. `run` waits `--init-pause` after initialization and before the measured phase; the default is 60 seconds, and a plain number is seconds.
 * `export s3`, `export nfs` and `export yt` now honor `__omit_backup = "true"`; `tools dump` honors it for tables and changefeeds. S3 export/import now skip async replication changefeeds.
 * Added `ydb admin cluster bridge rollback` to roll a converted cluster back to ordinary mode. `ydb admin cluster bridge list piles` shows its progress.
