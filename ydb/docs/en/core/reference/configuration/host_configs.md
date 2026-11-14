@@ -91,29 +91,47 @@ host_configs:
 ```
 
 
-To calculate fail domains at the `disk_scope` level for the static group and other storage groups, specify the corresponding fail domain type in the yaml config (top-level key):
+`block-4-2` needs 8 fail domains and tolerates the loss of 2 of them. Two distinct `disk_scope` labels on every server produce those 8 domains (4 servers × 2). One server failure then removes exactly 2 domains. A third distinct label on the same server would remove more than 2 domains, which this erasure does not tolerate. Extra disks are added under the same two labels. Each host needs its own `location.body`. The same label on different hosts is a different domain, because the host is part of the domain. The number of racks does not matter.
 
+The label is taken into account at level 50, immediately after the host (`unit` / `location.body`, level 40). An individual disk is level 255. The fail-domain boundary is therefore `domain_level_end: 60`. `ydbd_slice` expands a template key `fail_domain_type: disk_scope` into this geometry (`ydb/tools/cfg/types.py`, `DistinctionLevels`) for both the static group and storage pools.
 
-``` yaml
-fail_domain_type: disk_scope
-```
-
-
-And in the domain configuration:
-
+ConfigV2 does not accept `fail_domain_type: disk_scope`. That field allows only `rack`, `body` and `disk`. `body` (boundary 50) ignores `disk_scope`, and `disk` (boundary 256) makes every drive its own domain, so more than two VDisks of one group can land on one server. Set the geometry explicitly, and set the same geometry for the static group and for database storage pools. A full example is [block-4-2-4-nodes.yaml](https://github.com/ydb-platform/ydb/blob/main/ydb/deploy/yaml_config_examples/block-4-2-4-nodes.yaml).
 
 ```yaml
-domains:
-- domain_name: <domain name>
-  ...
-  storage_pool_kinds:
-  - kind: <type of physical devices used>
-    fail_domain_type: disk_scope
-    ...
+metadata:
+  kind: MainConfig
+  cluster: ""
+  version: 0
+config:
+  erasure: block-4-2
+  domain_name: Root
+  default_disk_type: SSD
+  self_management_config:
+    enabled: true
+    geometry: &disk_scope_geometry
+      realm_level_begin: 10
+      realm_level_end: 20
+      domain_level_begin: 10
+      domain_level_end: 60
+      num_fail_realms: 1
+      num_fail_domains_per_fail_realm: 8
+      num_vdisks_per_fail_domain: 1
+  storage_pool_types:
+  - kind: ssd
+    pool_config:
+      box_id: 1
+      erasure_species: block-4-2
+      kind: ssd
+      vdisk_kind: Default
+      geometry: *disk_scope_geometry
+      pdisk_filter:
+      - property:
+        - type: SSD
 ```
 
+`ydbd_slice` templates still use `fail_domain_type: disk_scope` and `domains[].storage_pool_kinds[].fail_domain_type: disk_scope`. Those keys belong to the template, not to a ConfigV2 file. The tool substitutes the geometry above when it builds the cluster configuration.
 
-With this configuration, two VDisks of each storage group will be placed on each server, and the maximum tolerated failure in such a configuration is the failure of a single server.
+With this configuration, two VDisks of each storage group are placed on each server, and the largest tolerated failure is the failure of one server.
 
 ## Kubernetes Features {#host-configs-k8s}
 
