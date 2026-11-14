@@ -227,3 +227,21 @@ The dashboard displays charts for metrics of a single topic and its associated c
 | Partition sessions started | Number of topic read sessions started by the consumer per second |
 
 Download the **Topic — Consumer** dashboard template: [topic-consumer.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/topic-consumer.json).
+
+## Aggregate load {#aggregate-load}
+
+Totals for the time range selected in the dashboard time picker and for the database selected in the `database` filter. Each panel is a single aggregated number. The dashboard does not contain time series.
+
+The dashboard contains the following filters:
+
+- `database` — database whose metrics are displayed;
+- `ds` — Prometheus data source.
+
+| Name | Description |
+| --- | --- |
+| Transactions | Total number of transactions over the selected interval. Sum of the increase of `ydb_table_transaction_total_duration_milliseconds_count` across all nodes and transaction types. |
+| CPU time | Total processor time spent on database nodes over the selected interval, in seconds. Sum of the increase of `utils_ElapsedMicrosec` across all nodes and execution pools, converted from microseconds. |
+| Topic data written | Volume written to all topics over the selected interval, in decimal megabytes (1 MB = 10^6 bytes). Sum of the increase of `ydb_topic_write_bytes` across all topics and nodes. |
+| Topic data read | Volume read from all topics over the selected interval, in decimal megabytes (1 MB = 10^6 bytes). Sum of the increase of `ydb_topic_read_bytes` across all topics and nodes. |
+
+Download the **Aggregate load** dashboard template: [aggregate-load.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/aggregate-load.json).
