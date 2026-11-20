@@ -7,6 +7,7 @@
 
 #include "topic_workload/topic_workload.h"
 #include "transfer_workload/transfer_workload.h"
+#include "replication_workload/replication_workload.h"
 
 #ifndef _win_
 #include "sqs_workload/sqs_workload.h"
@@ -76,6 +77,7 @@ TCommandWorkload::TCommandWorkload()
     AddHiddenCommand(std::make_unique<TCommandWorkloadSqs>());
 #endif
     AddCommand(std::make_unique<TCommandWorkloadTransfer>());
+    AddCommand(std::make_unique<TCommandWorkloadReplication>());
     AddCommand(std::make_unique<TCommandTPCC>());
     AddCommand(std::make_unique<TCommandVector>());
     AddCommand(std::make_unique<TCommandFulltext>());
