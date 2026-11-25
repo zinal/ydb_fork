@@ -227,3 +227,24 @@ The dashboard displays charts for metrics of a single topic and its associated c
 | Partition sessions started | Number of topic read sessions started by the consumer per second |
 
 Download the **Topic — Consumer** dashboard template: [topic-consumer.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/topic-consumer.json).
+
+## Async replication data flow {#async-replication-flow}
+
+Estimated [asynchronous replication](../../../concepts/async-replication.md) CDC traffic for one database, taken from DataShard row-write counters. Changefeeds do not have to exist. The dashboard filters are:
+
+- `database` — database whose tables will be replicated;
+- `Aggregation interval` — `rate()` window used to smooth the series;
+- `ds` — Prometheus data source.
+
+Every flow is expressed per minute: `rate(counter[$agg]) * 60`. Changing the aggregation interval does not change the unit.
+
+| Name | Description |
+| --- | --- |
+| Payload, bytes per minute | Mean cell-byte payload per minute. Key and written cells, with 8 bytes per delete removed. This is the `BINARY` topic body and a lower bound for `JSON`. |
+| Records per minute | Mean number of row updates and deletes per minute. One CDC record each. |
+| Cell bytes per record | Payload divided by records. Does not depend on the aggregation interval. |
+| Payload by operation, bytes per minute | The same payload split into updates and deletes. |
+| CDC topic write and read, bytes per minute | Topic write is the payload. Topic read adds 70 bytes of Topic API metadata per record. |
+| Records by operation, rows per minute | Updates and deletes per minute. |
+
+Download the **Async replication data flow** dashboard template: [async-replication-flow.json](https://raw.githubusercontent.com/ydb-platform/ydb/refs/heads/main/ydb/deploy/helm/ydb-prometheus/dashboards/async-replication-flow.json).
