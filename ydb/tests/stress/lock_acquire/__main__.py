@@ -25,7 +25,9 @@ def parse_args():
         epilog="""
 Example:
   for i in $(seq 1 8); do
-    ./lock_acquire_test --database /Root --instance-id worker-$i &
+    .venv/bin/python ydb/tests/stress/lock_acquire/__main__.py \\
+      --endpoint grpc://localhost:2136 --database /local --anonymous \\
+      --instance-id worker-$i &
   done
   wait
 """,
@@ -90,6 +92,11 @@ Example:
         "--instance-id",
         default=None,
         help="Instance label; defaults to host, process id, and a random suffix",
+    )
+    parser.add_argument(
+        "--anonymous",
+        action="store_true",
+        help="Use anonymous credentials, as required by a local YDB container",
     )
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
     return parser.parse_args()
@@ -369,12 +376,13 @@ def main():
         LOCK_COUNT,
     )
 
+    credentials = (
+        ydb.AnonymousCredentials()
+        if args.anonymous
+        else ydb.credentials_from_env_variables()
+    )
     driver = ydb.Driver(
-        ydb.DriverConfig(
-            args.endpoint,
-            args.database,
-            credentials=ydb.credentials_from_env_variables(),
-        )
+        ydb.DriverConfig(args.endpoint, args.database, credentials=credentials)
     )
     driver.wait(timeout=10, fail_fast=True)
     retry_settings = ydb.RetrySettings(max_retries=args.max_retries)
